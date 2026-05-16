@@ -8,14 +8,14 @@ export {
   type Ledger,
   type ImpureCircuits,
   type PureCircuits,
-} from './managed/hello-world/contract/index.js';
-import { Contract } from './managed/hello-world/contract/index.js';
+} from './managed/obsidian/contract/index.js';
+import { Contract } from './managed/obsidian/contract/index.js';
 
 const currentDir = path.resolve(new URL(import.meta.url).pathname, '..');
-export const zkConfigPath = path.resolve(currentDir, 'managed', 'hello-world');
+export const zkConfigPath = path.resolve(currentDir, 'managed', 'obsidian');
 
-export const CompiledHelloWorldContract = CompiledContract.make(
-  'HelloWorldContract',
+export const CompiledObsidianContract = CompiledContract.make(
+  'ObsidianContract',
   Contract,
 ).pipe(
   CompiledContract.withVacantWitnesses,
