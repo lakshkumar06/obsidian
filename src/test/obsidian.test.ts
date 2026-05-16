@@ -10,9 +10,9 @@ import pino from 'pino';
 
 import { getConfig } from '../config.js';
 import { MidnightWalletProvider, syncWallet } from '../wallet.js';
-import { buildProviders, type HelloWorldProviders } from '../providers.js';
+import { buildProviders, type ObsidianProviders } from '../providers.js';
 import {
-  CompiledHelloWorldContract,
+  CompiledObsidianContract,
   ledger,
   zkConfigPath,
 } from '../../contracts/index.js';
@@ -33,22 +33,24 @@ process.on('uncaughtException', (err) => {
 
 const ALICE_SEED =
   '0000000000000000000000000000000000000000000000000000000000000001';
-const ALICE_PRIVATE_STATE_ID = 'AlicePrivateHWState';
+const ALICE_PRIVATE_STATE_ID = 'AlicePrivateObsidianState';
 
 const logger = pino({
   level: process.env['LOG_LEVEL'] ?? 'info',
   transport: { target: 'pino-pretty' },
 });
 
-describe('Hello World Contract', () => {
+const bytes32 = (value: number) => new Uint8Array(32).fill(value);
+
+describe('Obsidian Contract', () => {
   let aliceWallet: MidnightWalletProvider;
-  let aliceProviders: HelloWorldProviders;
+  let aliceProviders: ObsidianProviders;
   let contractAddress: ContractAddress;
 
   const config = getConfig();
 
-  async function queryLedger(providers: HelloWorldProviders) {
-    const state = 
+  async function queryLedger(providers: ObsidianProviders) {
+    const state =
       await providers.publicDataProvider.queryContractState(contractAddress);
     expect(state).not.toBeNull();
     return ledger(state!.data);
@@ -77,7 +79,7 @@ describe('Hello World Contract', () => {
   });
 
   afterAll(async () => {
-    if(aliceWallet) {
+    if (aliceWallet) {
       logger.info('Stopping Alice wallet...');
       await aliceWallet.stop();
     }
@@ -87,7 +89,7 @@ describe('Hello World Contract', () => {
     logger.info(`Creating private state...`);
 
     const deployed: any = await (deployContract as any)(aliceProviders, {
-      compiledContract: CompiledHelloWorldContract,
+      compiledContract: CompiledObsidianContract,
       privateStateId: ALICE_PRIVATE_STATE_ID,
       initialPrivateState: {},
       args: [],
@@ -100,20 +102,67 @@ describe('Hello World Contract', () => {
     expect(contractAddress.length).toBeGreaterThan(0);
 
     const state = await queryLedger(aliceProviders);
-    expect(state.message).toEqual("");
+    expect(state.order_commitments.size()).toEqual(0n);
+    expect(state.nullifiers.size()).toEqual(0n);
+    expect(state.match_log.size()).toEqual(0n);
+    expect(state.audit_ciphertexts.size()).toEqual(0n);
   });
-  it('Stores Hello World!', async () => {
-    const message = "Hello World!";
+
+  it('Executes submit_order, propose_match, and atomic_settle', async () => {
+    const buyerCommitment = bytes32(5);
+    const buyerNullifier = bytes32(9);
+    const sellerCommitment = bytes32(6);
+    const sellerNullifier = bytes32(10);
+    const assetA = bytes32(12);
+    const assetB = bytes32(13);
+    const encryptedComplianceData = 'enc:audit:buyer-5:seller-6';
 
     await (submitCallTx as any)(aliceProviders, {
-      compiledContract: CompiledHelloWorldContract,
+      compiledContract: CompiledObsidianContract,
       contractAddress,
       privateStateId: ALICE_PRIVATE_STATE_ID,
-      circuitId: 'storeMessage',
-      args: [message],
+      circuitId: 'submit_order',
+      args: [buyerCommitment, buyerNullifier],
     });
 
-    const state = await queryLedger(aliceProviders);
-    expect(state.message).toEqual(message);
+    await (submitCallTx as any)(aliceProviders, {
+      compiledContract: CompiledObsidianContract,
+      contractAddress,
+      privateStateId: ALICE_PRIVATE_STATE_ID,
+      circuitId: 'submit_order',
+      args: [sellerCommitment, sellerNullifier],
+    });
+
+    await expect((submitCallTx as any)(aliceProviders, {
+      compiledContract: CompiledObsidianContract,
+      contractAddress,
+      privateStateId: ALICE_PRIVATE_STATE_ID,
+      circuitId: 'propose_match',
+      args: [buyerCommitment, sellerCommitment, 100n, 80n, assetA, assetB],
+    })).rejects.toThrow('TRADING_ASSET_MISMATCH');
+
+    await (submitCallTx as any)(aliceProviders, {
+      compiledContract: CompiledObsidianContract,
+      contractAddress,
+      privateStateId: ALICE_PRIVATE_STATE_ID,
+      circuitId: 'propose_match',
+      args: [buyerCommitment, sellerCommitment, 100n, 80n, assetA, assetA],
+    });
+
+    let state = await queryLedger(aliceProviders);
+    expect(state.match_log.member(buyerCommitment)).toBe(true);
+
+    await (submitCallTx as any)(aliceProviders, {
+      compiledContract: CompiledObsidianContract,
+      contractAddress,
+      privateStateId: ALICE_PRIVATE_STATE_ID,
+      circuitId: 'atomic_settle',
+      args: [buyerCommitment, sellerCommitment, encryptedComplianceData],
+    });
+
+    state = await queryLedger(aliceProviders);
+    expect(state.order_commitments.member(buyerCommitment)).toBe(false);
+    expect(state.order_commitments.member(sellerCommitment)).toBe(false);
+    expect(state.audit_ciphertexts.lookup(buyerCommitment)).toEqual(encryptedComplianceData);
   });
 });

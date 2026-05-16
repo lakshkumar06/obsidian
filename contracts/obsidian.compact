@@ -1,0 +1,59 @@
+pragma language_version >= 0.23;
+import CompactStandardLibrary;
+
+export ledger order_commitments: Map<Bytes<32>, Boolean>;
+export ledger nullifiers: Set<Bytes<32>>;
+export ledger match_log: Map<Bytes<32>, Boolean>;
+export ledger audit_ciphertexts: Map<Bytes<32>, Opaque<"string">>;
+export ledger regulator_pk: Bytes<32>;
+
+export circuit submit_order(
+  commitment: Bytes<32>,
+  nullifier: Bytes<32>,
+): [] {
+  const public_nullifier: Bytes<32> = disclose(nullifier);
+  const public_commitment: Bytes<32> = disclose(commitment);
+  assert(!nullifiers.member(public_nullifier), "ORDER_NULLIFIER_SPENT");
+  assert(!order_commitments.member(public_commitment), "DUPLICATE_ORDER_COMMITMENT");
+
+  order_commitments.insert(public_commitment, true);
+  nullifiers.insert(public_nullifier);
+}
+
+export circuit propose_match(
+  buyer_commitment: Bytes<32>,
+  seller_commitment: Bytes<32>,
+  buyer_max_price: Uint<64>,
+  seller_min_price: Uint<64>,
+  buyer_asset: Bytes<32>,
+  seller_asset: Bytes<32>,
+): [] {
+  const public_buyer_commitment: Bytes<32> = disclose(buyer_commitment);
+  const public_seller_commitment: Bytes<32> = disclose(seller_commitment);
+  assert(order_commitments.member(public_buyer_commitment), "BUYER_RECORD_NOT_FOUND");
+  assert(order_commitments.member(public_seller_commitment), "SELLER_RECORD_NOT_FOUND");
+
+  assert(buyer_asset == seller_asset, "TRADING_ASSET_MISMATCH");
+  assert(buyer_max_price >= seller_min_price, "ORDER_PRICE_OUT_OF_RANGE");
+
+  const pair_hash: Bytes<32> = public_buyer_commitment;
+  assert(!match_log.member(pair_hash), "PAIR_ALREADY_SETTLED");
+
+  match_log.insert(pair_hash, true);
+}
+
+export circuit atomic_settle(
+  buyer_commitment: Bytes<32>,
+  seller_commitment: Bytes<32>,
+  encrypted_compliance_data: Opaque<"string">,
+): [] {
+  const public_buyer_commitment: Bytes<32> = disclose(buyer_commitment);
+  const public_seller_commitment: Bytes<32> = disclose(seller_commitment);
+  const pair_hash: Bytes<32> = public_buyer_commitment;
+  assert(match_log.member(pair_hash), "MATCH_NOT_VALIDATED");
+
+  order_commitments.remove(public_buyer_commitment);
+  order_commitments.remove(public_seller_commitment);
+
+  audit_ciphertexts.insert(pair_hash, disclose(encrypted_compliance_data));
+}
