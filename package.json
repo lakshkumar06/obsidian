@@ -1,49 +1,18 @@
 {
-  "name": "obsidian",
+  "name": "obsidian-workspace",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
-  "engines": {
-    "node": ">=22.0.0"
-  },
+  "description": "Root scripts for frontend (demo UI) + core (Midnight contract & harness).",
   "scripts": {
-    "test": "NODE_OPTIONS='--experimental-vm-modules' vitest run",
-    "test:local": "MIDNIGHT_NETWORK=local yarn test",
-    "env:up": "docker compose up -d --wait",
-    "env:down": "docker compose down",
-    "validate": "yarn env:up && yarn test:local; yarn env:down"
-  },
-  "dependencies": {
-    "@midnight-ntwrk/compact-runtime": "0.16.0",
-    "@midnight-ntwrk/ledger-v8": "8.0.3",
-    "@midnight-ntwrk/midnight-js-contracts": "4.0.4",
-    "@midnight-ntwrk/midnight-js-http-client-proof-provider": "4.0.4",
-    "@midnight-ntwrk/midnight-js-indexer-public-data-provider": "4.0.4",
-    "@midnight-ntwrk/midnight-js-level-private-state-provider": "4.0.4",
-    "@midnight-ntwrk/midnight-js-network-id": "4.0.4",
-    "@midnight-ntwrk/midnight-js-node-zk-config-provider": "4.0.4",
-    "@midnight-ntwrk/midnight-js-types": "4.0.4",
-    "@midnight-ntwrk/midnight-js-utils": "4.0.4",
-    "@midnight-ntwrk/testkit-js": "4.0.4",
-    "@midnight-ntwrk/wallet-sdk-facade": "3.0.0",
-    "axios": "^1.15.0",
-    "pino": "^9.0.0",
-    "pino-pretty": "^13.0.0",
-    "rxjs": "^7.8.2",
-    "testcontainers": "^11.13.0",
-    "ws": "^8.14.2"
-  },
-  "devDependencies": {
-    "@midnight-ntwrk/midnight-js-compact": "4.0.4",
-    "@types/node": "^22.0.0",
-    "@types/ws": "^8.5.9",
-    "typescript": "^5.7.0",
-    "vitest": "^3.0.0"
-  },
-  "resolutions": {
-    "@midnight-ntwrk/ledger-v8": "8.0.3",
-    "@midnight-ntwrk/midnight-js-network-id": "4.0.4",
-    "@midnight-ntwrk/compact-runtime": "0.16.0"
+    "frontend:dev": "npm run dev --prefix frontend",
+    "frontend:build": "npm run build --prefix frontend",
+    "test": "yarn --cwd core test",
+    "test:local": "yarn --cwd core test:local",
+    "env:up": "docker compose -f core/compose.yml up -d --wait",
+    "env:down": "docker compose -f core/compose.yml down",
+    "validate": "yarn env:up && yarn test:local; yarn env:down",
+    "relayer": "yarn --cwd core relayer",
+    "demo:contracts": "yarn --cwd core demo:contracts"
   },
   "packageManager": "yarn@1.22.22"
 }

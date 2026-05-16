@@ -1,5 +1,12 @@
-/node_modules
-/contracts/managed
-/logs
-deployment.json
-/midnight-level-db
+.env
+.env.local
+.env.*.local
+/core/node_modules
+/core/contracts/managed
+/core/logs
+/core/midnight-level-db
+/core/deployment.json
+/frontend/node_modules
+/frontend/dist
+/frontend/public/zk
+**/tsconfig*.tsbuildinfo
