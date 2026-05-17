@@ -1,16 +1,12 @@
 import { useEffect, useState } from 'react';
-import { submitCallTx } from '@midnight-ntwrk/midnight-js-contracts';
 import type { MidnightProviders } from '@midnight-ntwrk/midnight-js-types';
 import type { ContractAddress } from '@midnight-ntwrk/compact-runtime';
 import { assertIsContractAddress, toHex } from '@midnight-ntwrk/midnight-js-utils';
 
-import { CompiledObsidianContract } from '../compiledObsidian';
-import {
-  ensureObsidianCallPrivateState,
-  OBSIDIAN_BROWSER_PRIVATE_STATE_ID,
-} from '../ensureObsidianCallPrivateState';
+import { executeAtomicSettle, executeProposeMatch } from '../darkPoolCircuits';
 import { formatMidnightError } from '../formatMidnightError';
-import { assetIdFromSymbol, hexToBytes32, parseLimitPriceToUint64 } from '../obsidianBytes';
+import { assetIdFromSymbol, parseLimitPriceToUint64 } from '../obsidianBytes';
+import type { MatchedPair } from '../orderMatcher';
 import type { OrderRow } from '../types';
 
 type OperatorProps = {
@@ -53,10 +49,8 @@ export function OperatorPanel({
     };
   }, [assetSymbol]);
 
-  async function runCircuit(
-    circuitId: 'propose_match' | 'atomic_settle',
-    args: unknown[],
-  ): Promise<void> {
+  async function handleProposeMatch(e: React.FormEvent) {
+    e.preventDefault();
     setError(null);
     setLastTx(null);
     if (!midnightProviders) {
@@ -69,60 +63,81 @@ export function OperatorPanel({
       window.alert('Paste a valid contract address first.');
       return;
     }
-
-    setBusy(circuitId === 'propose_match' ? 'match' : 'settle');
+    setBusy('match');
     try {
-      const contractAddress = trimmed as ContractAddress;
-      await ensureObsidianCallPrivateState(midnightProviders, contractAddress);
-      const finalized = await submitCallTx(midnightProviders, {
-        compiledContract: CompiledObsidianContract,
-        contractAddress,
-        privateStateId: OBSIDIAN_BROWSER_PRIVATE_STATE_ID,
-        circuitId,
-        args,
-      } as never);
-      setLastTx(String(finalized.public.txId ?? finalized.public.status));
+      const assetId = await assetIdFromSymbol(assetSymbol);
+      const pair: MatchedPair = {
+        buyer: {
+          id: 'manual-buyer',
+          asset: assetSymbol,
+          qty: '0',
+          price: buyerMax,
+          side: 'BUY',
+          commitmentHex: buyerHex,
+          boundPrice: buyerMax,
+          assetIdHex: toHex(assetId),
+          status: 'manual',
+        },
+        seller: {
+          id: 'manual-seller',
+          asset: assetSymbol,
+          qty: '0',
+          price: sellerMin,
+          side: 'SELL',
+          commitmentHex: sellerHex,
+          boundPrice: sellerMin,
+          assetIdHex: toHex(assetId),
+          status: 'manual',
+        },
+        buyerMax: parseLimitPriceToUint64(buyerMax),
+        sellerMin: parseLimitPriceToUint64(sellerMin),
+      };
+      const txId = await executeProposeMatch(
+        midnightProviders,
+        trimmed as ContractAddress,
+        pair,
+      );
+      setLastTx(txId);
     } catch (err) {
-      const msg = formatMidnightError(err);
-      console.error(`[Obsidian] ${circuitId} failed`, err);
-      setError(msg);
+      setError(formatMidnightError(err));
     } finally {
       setBusy(null);
     }
   }
 
-  async function handleProposeMatch(e: React.FormEvent) {
-    e.preventDefault();
-    try {
-      const buyerCommitment = hexToBytes32(buyerHex);
-      const sellerCommitment = hexToBytes32(sellerHex);
-      const assetId = await assetIdFromSymbol(assetSymbol);
-      await runCircuit('propose_match', [
-        buyerCommitment,
-        sellerCommitment,
-        parseLimitPriceToUint64(buyerMax),
-        parseLimitPriceToUint64(sellerMin),
-        assetId,
-        assetId,
-      ]);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  }
-
   async function handleAtomicSettle(e: React.FormEvent) {
     e.preventDefault();
+    setError(null);
+    setLastTx(null);
+    if (!midnightProviders) {
+      window.alert('Connect Lace and wait for the proving stack.');
+      return;
+    }
     try {
-      const buyerCommitment = hexToBytes32(buyerHex);
-      const sellerCommitment = hexToBytes32(sellerHex);
-      const payload = complianceData.trim();
-      if (payload.length === 0) {
-        setError('Compliance ciphertext string is required');
-        return;
-      }
-      await runCircuit('atomic_settle', [buyerCommitment, sellerCommitment, payload]);
+      assertIsContractAddress(trimmed);
+    } catch {
+      window.alert('Paste a valid contract address first.');
+      return;
+    }
+    const payload = complianceData.trim();
+    if (payload.length === 0) {
+      setError('Compliance ciphertext string is required');
+      return;
+    }
+    setBusy('settle');
+    try {
+      const txId = await executeAtomicSettle(
+        midnightProviders,
+        trimmed as ContractAddress,
+        buyerHex,
+        sellerHex,
+        payload,
+      );
+      setLastTx(txId);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formatMidnightError(err));
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -136,12 +151,10 @@ export function OperatorPanel({
 
   return (
     <div style={panelStyle}>
-      <h3>Operator / dev — match &amp; settle</h3>
+      <h3>Manual override — match &amp; settle</h3>
       <p style={{ fontSize: '12px', color: '#444', marginBottom: '12px' }}>
-        Drives <code>propose_match</code> and <code>atomic_settle</code> from the browser (same stack as{' '}
-        <code>yarn test:local</code>). Buyer commitment is the on-chain pair anchor in{' '}
-        <code>match_log</code> / <code>audit_ciphertexts</code>. Both legs must already be submitted via{' '}
-        <code>submit_order</code>.
+        Normal flow auto-matches after submit. Use this only for debugging or when auto-match was
+        skipped. Buyer commitment anchors <code>match_log</code> / <code>audit_ciphertexts</code>.
       </p>
 
       {orders.some((o) => o.commitmentHex) ? (

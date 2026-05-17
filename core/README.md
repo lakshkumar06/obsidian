@@ -79,6 +79,23 @@ Run from **`core/`** — or use **`yarn demo:contracts`** from the **repository 
 
 The script deploys a **new** contract, runs `submit_order` twice, intentionally fails `propose_match` (`TRADING_ASSET_MISMATCH`), then succeeds `propose_match` → `atomic_settle`, and prints **`OBSIDIAN_CONTRACT_ADDRESS=…`** for the **[matching relayer](src/matching_relayer_daemon.ts)**.
 
+### Submit a crossing BUY + SELL on an existing contract (terminal)
+
+Uses `OBSIDIAN_CONTRACT_ADDRESS` from `../.env` (same as the UI). No Lace — the Node test wallet signs all txs.
+
+```bash
+# from obsidian/ monorepo root (after env:up and .env has contract address)
+yarn demo:submit-pair
+
+# Only create the two orders (queued on-chain), no match/settle:
+yarn demo:submit-pair --orders-only
+
+# SELL first, then BUY (same order you tested in the browser):
+yarn demo:submit-pair --sell-first
+```
+
+Optional env: `CLI_ASSET=wETH`, `CLI_PRICE=2`, `CLI_SEED=…`, `LOG_LEVEL=debug`.
+
 Optional env: **`DEMO_SEED`**, **`DEMO_PRIVATE_STATE_ID`**.
 
 ## Tests

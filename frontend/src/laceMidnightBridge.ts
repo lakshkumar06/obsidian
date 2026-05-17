@@ -48,6 +48,18 @@ type LaceConnected = ConnectedAPI;
 
 export type GetLaceConnection = () => Promise<LaceConnected>;
 
+export type LaceWalletStep = 'balance' | 'submit';
+
+let laceWalletStepListener: ((step: LaceWalletStep, circuitHint?: string) => void) | null =
+  null;
+
+/** UI hook: count Lace popups (balance + submit per on-chain circuit). */
+export function setLaceWalletStepListener(
+  listener: ((step: LaceWalletStep, circuitHint?: string) => void) | null,
+): void {
+  laceWalletStepListener = listener;
+}
+
 function wrapLaceCall<T>(step: string, fn: () => Promise<T>): Promise<T> {
   return fn().catch((err) => {
     throw new Error(`Lace ${step} failed: ${formatMidnightError(err)}`, { cause: err });
@@ -94,6 +106,7 @@ export class LaceWalletMidnightBridge implements WalletProvider, MidnightProvide
   async balanceTx(tx: UnboundTransaction, ttl: Date = ttlOneHour()): Promise<FinalizedTransaction> {
     void ttl;
     const serializedHex = Buffer.from(tx.serialize()).toString('hex');
+    laceWalletStepListener?.('balance');
 
     let lastErr: unknown;
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -127,6 +140,8 @@ export class LaceWalletMidnightBridge implements WalletProvider, MidnightProvide
 
     const hexToSubmit = this.lastBalancedTxHex ?? Buffer.from(tx.serialize()).toString('hex');
     this.lastBalancedTxHex = null;
+
+    laceWalletStepListener?.('submit');
 
     let lastErr: unknown;
     for (let attempt = 0; attempt < 2; attempt++) {

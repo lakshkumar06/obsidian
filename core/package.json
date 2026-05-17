@@ -13,7 +13,9 @@
     "env:down": "docker compose down",
     "validate": "yarn env:up && yarn test:local; yarn env:down",
     "relayer": "NODE_OPTIONS='--experimental-vm-modules' node --env-file=../.env ./node_modules/.bin/tsx src/matching_relayer_daemon.ts",
-    "demo:contracts": "MIDNIGHT_NETWORK=local NODE_OPTIONS='--experimental-vm-modules' tsx src/live_contract_demo.ts"
+    "demo:contracts": "MIDNIGHT_NETWORK=local NODE_OPTIONS='--experimental-vm-modules' tsx src/live_contract_demo.ts",
+    "demo:submit-pair": "MIDNIGHT_NETWORK=local NODE_OPTIONS='--experimental-vm-modules' node --env-file=../.env ./node_modules/.bin/tsx src/submit_crossing_pair.ts",
+    "match-existing": "MIDNIGHT_NETWORK=local NODE_OPTIONS='--experimental-vm-modules' node --env-file=../.env ./node_modules/.bin/tsx src/match_existing_pair.ts"
   },
   "dependencies": {
     "@midnight-ntwrk/compact-runtime": "0.16.0",

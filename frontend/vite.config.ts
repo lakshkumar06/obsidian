@@ -46,6 +46,11 @@ export default defineConfig(({ mode }) => {
         changeOrigin: true,
         rewrite: (reqPath) => reqPath.replace(/^\/midnight-proof/, '') || '/',
       },
+      '/relayer': {
+        target: 'http://127.0.0.1:3033',
+        changeOrigin: true,
+        rewrite: (reqPath) => reqPath.replace(/^\/relayer/, '') || '/',
+      },
     },
   },
 };

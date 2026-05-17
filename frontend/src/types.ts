@@ -18,6 +18,8 @@ export type LedgerOrderStatus = {
   pollError: string | null;
 };
 
+export type OrderQueueStatus = 'queued' | 'matching' | 'settling';
+
 export type OrderRow = {
   /** UI-only row identifier */
   id: string;
@@ -25,6 +27,10 @@ export type OrderRow = {
   qty: string;
   price: string;
   side: OrderSide;
+  /** Off-chain matching pool state (auto match after submit) */
+  queueStatus?: OrderQueueStatus;
+  counterpartyOrderId?: string;
+  matchError?: string;
   /** SHA-256 asset id hex used for relayer / propose_match */
   assetIdHex?: string;
   /** BUY max price / SELL min price (uint64 string for JSON) */

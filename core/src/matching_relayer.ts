@@ -4,6 +4,8 @@ import type { ContractAddress, ContractState } from '@midnight-ntwrk/compact-run
 import type { Logger } from 'pino';
 
 import { CompiledObsidianContract, ledger, type Ledger } from '../contracts/index.js';
+import { appendActivity } from './activity_log.js';
+import { ensureObsidianCallPrivateState } from './ensure_obsidian_private_state.js';
 import type { ObsidianProviders } from './providers.js';
 
 export type LocalIntentSide = 'BUY' | 'SELL';
@@ -84,6 +86,15 @@ export class MatchingRelayer {
     const key = commitmentKeyHex(commitment);
     this.localizedIntentPool.set(key, record);
     this.logger.info({ commitment: key.slice(0, 16) }, 'Registered local intent');
+    appendActivity({
+      source: 'relayer',
+      type: 'intent.registered',
+      commitmentHex: key,
+      side: record.side,
+      maxPrice: record.maxPrice?.toString(),
+      minPrice: record.minPrice?.toString(),
+      poolSize: this.localizedIntentPool.size,
+    });
     void this.evaluatePoolForMatches(key);
   }
 
@@ -130,6 +141,12 @@ export class MatchingRelayer {
     this.previousCommitmentKeys = currentKeys;
 
     for (const commitmentHex of newKeys) {
+      appendActivity({
+        source: 'relayer',
+        type: 'chain.commitment_added',
+        commitmentHex,
+        hasLocalIntent: this.localizedIntentPool.has(commitmentHex),
+      });
       await this.evaluatePoolForMatches(commitmentHex);
     }
   }
@@ -194,6 +211,14 @@ export class MatchingRelayer {
         },
         'Potential match — invoking propose_match',
       );
+      appendActivity({
+        source: 'relayer',
+        type: 'match.attempt',
+        buyerHex,
+        sellerHex,
+        buyerMax: buyerMax.toString(),
+        sellerMin: sellerMin.toString(),
+      });
 
       const matched = await this.executeProposeMatch(
         hexToBytes32(buyerHex),
@@ -217,10 +242,15 @@ export class MatchingRelayer {
     sellerMinPrice: bigint,
     buyerAsset: Uint8Array,
     sellerAsset: Uint8Array,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
+      await ensureObsidianCallPrivateState(
+        this.providers,
+        this.contractAddress,
+        this.privateStateId,
+      );
       this.logger.info('Invoking zero-knowledge propose_match circuit (proof server + wallet)…');
-      await (submitCallTx as any)(this.providers, {
+      await (submitCallTx as (p: unknown, o: unknown) => Promise<unknown>)(this.providers, {
         compiledContract: CompiledObsidianContract,
         contractAddress: this.contractAddress,
         privateStateId: this.privateStateId,
@@ -235,8 +265,66 @@ export class MatchingRelayer {
         ],
       });
       this.logger.info('propose_match transaction finalized on-chain');
+      appendActivity({
+        source: 'relayer',
+        type: 'match.propose_ok',
+        buyerHex: commitmentKeyHex(buyerCommitment),
+        sellerHex: commitmentKeyHex(sellerCommitment),
+      });
+      return true;
     } catch (error) {
       this.logger.error({ error }, 'propose_match failed (circuit or tx rejected)');
+      appendActivity({
+        source: 'relayer',
+        type: 'match.propose_fail',
+        buyerHex: commitmentKeyHex(buyerCommitment),
+        sellerHex: commitmentKeyHex(sellerCommitment),
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  }
+
+  private async executeAtomicSettle(
+    buyerCommitment: Uint8Array,
+    sellerCommitment: Uint8Array,
+  ): Promise<boolean> {
+    const buyerHex = commitmentKeyHex(buyerCommitment);
+    const sellerHex = commitmentKeyHex(sellerCommitment);
+    const compliance = `enc:audit:relayer:${Date.now()}`;
+    try {
+      await ensureObsidianCallPrivateState(
+        this.providers,
+        this.contractAddress,
+        this.privateStateId,
+      );
+      this.logger.info('Invoking atomic_settle…');
+      await (submitCallTx as (p: unknown, o: unknown) => Promise<unknown>)(this.providers, {
+        compiledContract: CompiledObsidianContract,
+        contractAddress: this.contractAddress,
+        privateStateId: this.privateStateId,
+        circuitId: 'atomic_settle',
+        args: [buyerCommitment, sellerCommitment, compliance],
+      });
+      this.logger.info('atomic_settle transaction finalized on-chain');
+      appendActivity({
+        source: 'relayer',
+        type: 'match.settle_ok',
+        buyerHex,
+        sellerHex,
+        compliance,
+      });
+      return true;
+    } catch (error) {
+      this.logger.error({ error }, 'atomic_settle failed');
+      appendActivity({
+        source: 'relayer',
+        type: 'match.settle_fail',
+        buyerHex,
+        sellerHex,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
     }
   }
 }

@@ -52,14 +52,18 @@ Optional:
 ### Trader
 
 - Submit real `submit_order` transactions (commitment + nullifier on-chain).
-- Form labels (qty, asset, limit) are notebook metadata; side + price bound + asset id hash are stored for matching.
-- Table polls indexer every 12s: commitment active → match_log (buyer) → audit ciphertext.
-- Expand a row for full commitment hex, relayer intent JSON, copy buttons.
+- **Auto-match:** after submit, the UI scans the local queue and runs `propose_match` → `atomic_settle` when:
+  - Same asset id
+  - Opposite side (BUY vs SELL)
+  - Buyer max price ≥ seller min price
+  - Buy quantity ≤ sell quantity
+- If no cross exists, the order stays **queued** until a later submit or indexer poll finds a match.
+- Table polls indexer every 12s and retries matching for queued orders.
+- Expand a row for commitment hex, relayer JSON, copy buttons.
 
-### Operator / dev
+### Manual override
 
-- `propose_match` and `atomic_settle` from the browser.
-- Quick-fill buyer/seller hex from session orders.
+- Collapsed **Manual override** panel for debugging (`propose_match` / `atomic_settle` without auto-match).
 
 ### Regulator
 

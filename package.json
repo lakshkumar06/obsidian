@@ -12,7 +12,9 @@
     "env:down": "docker compose -f core/compose.yml down",
     "validate": "yarn env:up && yarn test:local; yarn env:down",
     "relayer": "yarn --cwd core relayer",
-    "demo:contracts": "yarn --cwd core demo:contracts"
+    "demo:contracts": "yarn --cwd core demo:contracts",
+    "demo:submit-pair": "yarn --cwd core demo:submit-pair",
+    "match-existing": "yarn --cwd core match-existing"
   },
   "packageManager": "yarn@1.22.22"
 }

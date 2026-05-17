@@ -41,8 +41,13 @@ function isOrderRow(value: unknown): value is OrderRow {
 }
 
 function normalizeOrderRow(row: OrderRow): OrderRow {
+  const side = row.side === 'SELL' ? 'SELL' : 'BUY';
+  const settled = row.ledgerStatus?.auditPresent || row.ledgerStatus?.pairedSettled;
   return {
     ...row,
-    side: row.side === 'SELL' ? 'SELL' : 'BUY',
+    side,
+    queueStatus:
+      row.queueStatus ??
+      (settled || row.ledgerStatus?.commitmentActive === false ? undefined : 'queued'),
   };
 }

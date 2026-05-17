@@ -16,7 +16,9 @@ import { getConfig } from './config.js';
 import { MidnightWalletProvider, syncWallet } from './wallet.js';
 import { buildProviders } from './providers.js';
 import { zkConfigPath } from '../contracts/index.js';
+import { appendActivity, getActivityLogPath } from './activity_log.js';
 import { MatchingRelayer } from './matching_relayer.js';
+import { startRelayerHttpServer } from './relayer_http.js';
 import type { ContractAddress } from '@midnight-ntwrk/compact-runtime';
 
 // @ts-expect-error WebSocket global assignment for Apollo/indexer subscriptions
@@ -69,12 +71,25 @@ async function main(): Promise<void> {
   );
 
   await relayer.startListening();
+
+  const httpPort = Number(process.env['OBSIDIAN_RELAYER_HTTP_PORT'] ?? '3033');
+  const httpServer = startRelayerHttpServer(relayer, logger, httpPort);
+
+  appendActivity({
+    source: 'relayer',
+    type: 'relayer.started',
+    contractAddress,
+    activityLog: getActivityLogPath(),
+    httpPort,
+  });
+
   logger.info(
-    { contractAddress, privateStateId },
+    { contractAddress, privateStateId, activityLog: getActivityLogPath(), httpPort },
     'Matching relayer running. Press Ctrl+C to stop.',
   );
 
   const shutdown = async () => {
+    httpServer.close();
     relayer.stop();
     await wallet.stop();
     process.exit(0);
