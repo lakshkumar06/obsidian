@@ -18,19 +18,23 @@ import {
   type EnvironmentConfiguration,
   FluentWalletBuilder,
 } from '@midnight-ntwrk/testkit-js';
+import type { UnshieldedKeystore } from '@midnight-ntwrk/wallet-sdk-unshielded-wallet';
 import * as Rx from 'rxjs';
 import type { Logger } from 'pino';
 
 export class MidnightWalletProvider implements MidnightProvider, WalletProvider {
   readonly wallet: WalletFacade;
+  readonly unshieldedKeystore: UnshieldedKeystore;
 
   private constructor(
     private readonly logger: Logger,
     wallet: WalletFacade,
+    unshieldedKeystore: UnshieldedKeystore,
     private readonly zswapSecretKeys: ZswapSecretKeys,
     private readonly dustSecretKey: DustSecretKey,
   ) {
     this.wallet = wallet;
+    this.unshieldedKeystore = unshieldedKeystore;
   }
 
   getCoinPublicKey(): CoinPublicKey {
@@ -74,11 +78,12 @@ export class MidnightWalletProvider implements MidnightProvider, WalletProvider 
     env: EnvironmentConfiguration,
     seed: string,
   ): Promise<MidnightWalletProvider> {
-    const isPreprod = env.networkId === 'preprod';
+    const isRemote =
+      env.networkId === 'preview' || env.networkId === 'preprod';
     const dustOptions: DustWalletOptions = {
       ledgerParams: LedgerParameters.initialParameters(),
-      // Preprod deploy txs need higher fee headroom (Midnight deploy guide).
-      additionalFeeOverhead: isPreprod ? 300_000_000_000_000n : 1_000n,
+      // Remote deploy txs need higher fee headroom (Midnight deploy guide).
+      additionalFeeOverhead: isRemote ? 300_000_000_000_000n : 1_000n,
       feeBlocksMargin: 5,
     };
 
@@ -86,8 +91,9 @@ export class MidnightWalletProvider implements MidnightProvider, WalletProvider 
       .withDustOptions(dustOptions);
 
     const buildResult = await builder.withSeed(seed).buildWithoutStarting();
-    const { wallet, seeds } = buildResult as {
+    const { wallet, seeds, keystore } = buildResult as {
       wallet: WalletFacade;
+      keystore: UnshieldedKeystore;
       seeds: {
         masterSeed: string;
         shielded: Uint8Array;
@@ -100,6 +106,7 @@ export class MidnightWalletProvider implements MidnightProvider, WalletProvider 
     return new MidnightWalletProvider(
       logger,
       wallet,
+      keystore,
       ZswapSecretKeys.fromSeed(seeds.shielded),
       DustSecretKey.fromSeed(seeds.dust),
     );
@@ -151,12 +158,22 @@ function formatSyncTimeoutError(
     `Wallet sync timed out after ${timeoutMs}ms (${emissionCount} state emissions).`,
     `Last progress: ${progress}.`,
   ];
-  if (networkId === 'preprod') {
+  if (networkId === 'preview' || networkId === 'preprod') {
+    const faucetUi =
+      networkId === 'preview'
+        ? 'https://faucet.preview.midnight.network/'
+        : 'https://faucet.preprod.midnight.network/';
+    const dustUi =
+      networkId === 'preview'
+        ? 'https://dust.preview.midnight.network/'
+        : 'https://dust.preprod.midnight.network/';
+    const deployCmd =
+      networkId === 'preview' ? 'yarn deploy:preview' : 'yarn deploy:preprod';
     lines.push(
-      'Preprod deploy needs a funded wallet with DUST (gas):',
-      '1. Fund tNight — https://faucet.preprod.midnight.network/',
-      '2. Register unshielded UTXOs for DUST (see https://docs.midnight.network/guides/deploy-mn-app)',
-      '3. Wait until shielded + dust sync complete, then re-run yarn deploy:preprod',
+      `${networkId} deploy needs a funded wallet with DUST (gas):`,
+      `1. Fund tNight — ${faucetUi}`,
+      `2. Register for DUST — ${dustUi} or https://docs.midnight.network/guides/deploy-mn-app`,
+      `3. Wait until shielded + dust sync complete, then re-run ${deployCmd}`,
       'Optional: WALLET_SYNC_TIMEOUT_MS=300000 for a longer wait.',
     );
   }

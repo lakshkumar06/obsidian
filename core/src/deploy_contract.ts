@@ -2,8 +2,9 @@
  * Deploy Obsidian to the configured Midnight network and print the contract address.
  *
  * Local: `yarn env:up`, `DEPLOY_SEED` in ../.env, then `yarn deploy:contracts`
- * Preprod: funded wallet + DUST, proof server on :6300, then `yarn deploy:preprod`
- *   https://docs.midnight.network/guides/deploy-mn-app
+ * Preview (public testnet, Lace default): `yarn deploy:preview`
+ * Preprod: `yarn deploy:preprod`
+ *   https://docs.midnight.network/relnotes/network
  */
 import { WebSocket } from 'ws';
 import { setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
@@ -12,7 +13,8 @@ import type { ContractAddress } from '@midnight-ntwrk/compact-runtime';
 import type { EnvironmentConfiguration } from '@midnight-ntwrk/testkit-js';
 import pino from 'pino';
 
-import { getConfig } from './config.js';
+import { getConfig, isRemoteMidnightNetwork } from './config.js';
+import { ensureRemoteWalletReady } from './ensure_remote_wallet.js';
 import { MidnightWalletProvider, syncWallet } from './wallet.js';
 import { buildProviders } from './providers.js';
 import { CompiledObsidianContract, zkConfigPath } from '../contracts/index.js';
@@ -49,27 +51,37 @@ async function main(): Promise<void> {
     proofServer: config.proofServer,
   };
 
-  if (config.networkId === 'preprod') {
+  if (isRemoteMidnightNetwork(config.networkId)) {
     logger.info(
       {
+        network: config.networkId,
         faucet: config.faucet,
         proofServer: config.proofServer,
       },
-      'Preprod deploy — fund wallet at faucet and ensure proof server is running',
+      'Remote deploy — fund wallet at faucet UI and register DUST before deploying',
     );
   }
 
   const wallet = await MidnightWalletProvider.build(logger, envConfig, seed);
   await wallet.start();
 
-  const syncTimeoutMs =
-    config.networkId === 'preprod'
-      ? Number(process.env['WALLET_SYNC_TIMEOUT_MS'] ?? 180_000)
-      : 600_000;
+  if (isRemoteMidnightNetwork(config.networkId)) {
+    await ensureRemoteWalletReady(
+      logger,
+      config,
+      wallet.wallet,
+      wallet.unshieldedKeystore,
+    );
+  }
+
+  const remote = isRemoteMidnightNetwork(config.networkId);
+  const syncTimeoutMs = remote
+    ? Number(process.env['WALLET_SYNC_TIMEOUT_MS'] ?? 180_000)
+    : 600_000;
 
   await syncWallet(logger, wallet.wallet, {
     timeoutMs: syncTimeoutMs,
-    logThrottleMs: config.networkId === 'preprod' ? 5_000 : 2_000,
+    logThrottleMs: remote ? 5_000 : 2_000,
   });
 
   const providers = buildProviders(wallet, zkConfigPath, config);
