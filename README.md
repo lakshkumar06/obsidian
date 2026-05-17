@@ -16,6 +16,26 @@ Traders publish only **32-byte commitments** and **nullifiers** on-chain (`submi
 
 Contract: `[core/contracts/obsidian.compact](core/contracts/obsidian.compact)`
 
+## Preview deployment
+
+Obsidian is deployed on the **Midnight preview** public testnet (Lace default network).
+
+| | |
+| --- | --- |
+| **Network** | `preview` |
+| **Contract address** | `bfa7c0324bf1b322fd51093594109b0afda7ca13f404a5068f63f972afff198f` |
+| **Explorer** | [explorer.preview.midnight.network](https://explorer.preview.midnight.network/) |
+
+Set in `.env` for the UI and relayer:
+
+```bash
+OBSIDIAN_CONTRACT_ADDRESS=bfa7c0324bf1b322fd51093594109b0afda7ca13f404a5068f63f972afff198f
+```
+
+For the frontend, use Lace on **preview** and optionally `VITE_MIDNIGHT_NETWORK_ID=preview` when running `yarn frontend:dev`.
+
+Redeploy to preview: `yarn deploy:preview` (see [Midnight network endpoints](https://docs.midnight.network/relnotes/network)).
+
 ### end to end flow
 
 ```mermaid
@@ -78,8 +98,6 @@ yarn frontend:dev
 | `OBSIDIAN_RELAYER_HTTP_PORT` | Relayer API port (default `3033`) |
 
 
-See `[.env.example](.env.example)`. Do not commit `.env`.
-
 ## Scripts
 
 
@@ -87,7 +105,9 @@ See `[.env.example](.env.example)`. Do not commit `.env`.
 | ------------------------------- | --------------------------------- |
 | `yarn env:up` / `yarn env:down` | Docker devnet                     |
 | `yarn frontend:dev`             | Vite UI on :5173                  |
-| `yarn deploy:contracts`         | Deploy contract (prints address)  |
+| `yarn deploy:contracts`         | Deploy contract to local devnet     |
+| `yarn deploy:preview`           | Deploy contract to preview testnet  |
+| `yarn deploy:preprod`           | Deploy contract to preprod          |
 | `yarn submit:pair`              | CLI BUY + SELL + match/settle     |
 | `yarn relayer`                  | Matching relayer + HTTP API       |
 | `yarn test:local`               | Vitest on local devnet            |
@@ -95,6 +115,7 @@ See `[.env.example](.env.example)`. Do not commit `.env`.
 
 ## References
 
+- [Midnight network endpoints](https://docs.midnight.network/relnotes/network) (preview, preprod, mainnet)
 - [Midnight local network](https://docs.midnight.network/guides/midnight-local-network)
 - [Midnight Hello World](https://docs.midnight.network/getting-started/hello-world)
 
