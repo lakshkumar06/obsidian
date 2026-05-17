@@ -6,12 +6,12 @@
  *
  * Prerequisites:
  *   yarn env:up   (from obsidian/ monorepo root)
- *   OBSIDIAN_CONTRACT_ADDRESS in ../.env (from yarn demo:contracts or your deploy)
+ *   OBSIDIAN_CONTRACT_ADDRESS in ../.env (from yarn deploy:contracts or your deploy)
  *
  * Usage (from core/):
- *   yarn demo:submit-pair
- *   yarn demo:submit-pair --orders-only     # only submit_order ×2 (leave queued)
- *   yarn demo:submit-pair --sell-first      # SELL then BUY (like your browser test)
+ *   yarn submit:pair
+ *   yarn submit:pair --orders-only     # only submit_order ×2 (leave queued)
+ *   yarn submit:pair --sell-first      # SELL then BUY
  *
  * Env:
  *   CLI_SEED — wallet seed (default: test seed 0x01…)

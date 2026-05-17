@@ -51,7 +51,7 @@ function priceSpreadCrosses(buyer: OrderRow, seller: OrderRow): boolean {
   return buyerMax >= sellerMin;
 }
 
-/** Demo fill rule: buy size must not exceed sell size (partial fill against larger sell). */
+/** Buy size must not exceed sell size (partial fill against larger sell). */
 function quantityCompatible(buyer: OrderRow, seller: OrderRow): boolean {
   const buyQty = parseOrderQty(buyer.qty);
   const sellQty = parseOrderQty(seller.qty);
@@ -186,7 +186,7 @@ export function buildMatchedPair(a: OrderRow, b: OrderRow): MatchedPair | null {
   };
 }
 
-/** Best counterparty for `incoming` (newest crossing peer first — matches “BUY then SELL” demos). */
+/** Best counterparty for `incoming` (newest crossing peer first). */
 export function findCounterparty(incoming: OrderRow, pool: OrderRow[]): MatchedPair | null {
   if (!isMatchEligible(incoming)) {
     return null;

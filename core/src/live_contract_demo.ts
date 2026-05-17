@@ -5,10 +5,10 @@
  * Prerequisites: from repo root, `yarn env:up`; from `core/`, deps installed (`yarn install`).
  *
  * Usage:
- *   MIDNIGHT_NETWORK=local yarn demo:contracts
+ *   MIDNIGHT_NETWORK=local yarn deploy:contracts
  *
  * Env:
- *   DEMO_SEED — hex seed (default: same as harness tests)
+ *   WALLET_SEED — hex seed (default: same as harness tests)
  */
 import { WebSocket } from 'ws';
 import { setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
@@ -30,11 +30,11 @@ const logger = pino({
   transport: { target: 'pino-pretty' },
 });
 
-const DEMO_SEED =
-  process.env['DEMO_SEED']?.trim() ||
+const WALLET_SEED =
+  process.env['WALLET_SEED']?.trim() ||
   '0000000000000000000000000000000000000000000000000000000000000001';
 const PRIVATE_STATE_ID =
-  process.env['DEMO_PRIVATE_STATE_ID']?.trim() || 'LiveDemoAliceObsidian';
+  process.env['DEPLOY_PRIVATE_STATE_ID']?.trim() || 'ObsidianDeployAlice';
 
 const bytes32 = (value: number) => new Uint8Array(32).fill(value);
 
@@ -48,7 +48,7 @@ async function main(): Promise<void> {
   const config = getConfig();
   setNetworkId(config.networkId);
 
-  logger.info('Starting Midnight local demo (deploy → submit_order ×2 → propose_match → atomic_settle)');
+  logger.info('Deploying contract and running submit_order ×2 → propose_match → atomic_settle');
 
   const envConfig: EnvironmentConfiguration = {
     walletNetworkId: config.networkId,
@@ -61,7 +61,7 @@ async function main(): Promise<void> {
     proofServer: config.proofServer,
   };
 
-  const wallet = await MidnightWalletProvider.build(logger, envConfig, DEMO_SEED);
+  const wallet = await MidnightWalletProvider.build(logger, envConfig, WALLET_SEED);
   await wallet.start();
   await syncWallet(logger, wallet.wallet, 600_000);
 
@@ -102,7 +102,7 @@ async function main(): Promise<void> {
   const sellerNullifier = bytes32(10);
   const assetA = bytes32(12);
   const assetB = bytes32(13);
-  const encryptedComplianceData = `enc:audit:demo:${Date.now()}`;
+  const encryptedComplianceData = `enc:audit:local:${Date.now()}`;
 
   logger.info('submit_order — buyer leg');
   await (submitCallTx as (p: unknown, o: unknown) => Promise<unknown>)(providers, {

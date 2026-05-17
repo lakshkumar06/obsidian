@@ -2,7 +2,7 @@
   "name": "obsidian-workspace",
   "version": "0.1.0",
   "private": true,
-  "description": "Root scripts for frontend (demo UI) + core (Midnight contract & harness).",
+  "description": "Obsidian dark pool — frontend UI + Midnight contract harness.",
   "scripts": {
     "frontend:dev": "npm run dev --prefix frontend",
     "frontend:build": "npm run build --prefix frontend",
@@ -12,8 +12,8 @@
     "env:down": "docker compose -f core/compose.yml down",
     "validate": "yarn env:up && yarn test:local; yarn env:down",
     "relayer": "yarn --cwd core relayer",
-    "demo:contracts": "yarn --cwd core demo:contracts",
-    "demo:submit-pair": "yarn --cwd core demo:submit-pair",
+    "deploy:contracts": "yarn --cwd core deploy:contracts",
+    "submit:pair": "yarn --cwd core submit:pair",
     "match-existing": "yarn --cwd core match-existing"
   },
   "packageManager": "yarn@1.22.22"

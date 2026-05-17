@@ -7,7 +7,7 @@ export const OBSIDIAN_BROWSER_PRIVATE_STATE_ID: PrivateStateId = 'ObsidianBrowse
 /**
  * Midnight.js loads private witness state from the provider before proving.
  * Deploy seeds `{}` via `initialPrivateState`; when attaching to an existing contract
- * (e.g. address from `yarn demo:contracts`) we must seed the same empty object once.
+ * (e.g. address from `yarn deploy:contracts`) we must seed the same empty object once.
  */
 export async function ensureObsidianCallPrivateState(
   providers: MidnightProviders,

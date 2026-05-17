@@ -67,7 +67,7 @@ export function formatMidnightError(err: unknown): string {
       'This is not Cardano test ADA — fund the Midnight Undeployed profile:\n' +
       '• Midnight local network guide: https://docs.midnight.network/guides/midnight-local-network\n' +
       '• Fund tNIGHT on undeployed, then in Lace generate/register DUST (fee token).\n' +
-      '• Or run `yarn demo:contracts` in core/ (CLI wallet is auto-funded) to verify the stack.\n' +
+      '• Or run `yarn deploy:contracts` in core/ (CLI wallet is auto-funded) to verify the stack.\n' +
       'Reconnect Lace after funding and check the DUST line shown below your address.'
     );
   }

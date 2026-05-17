@@ -215,7 +215,7 @@ async function createProofProviderForLace(
 
 /**
  * Lace balance/submit + indexer from Lace settings.
- * Proving: wallet `getProvingProvider` when present, else HTTP proof-server (same as `yarn demo:contracts` harness).
+ * Proving: wallet `getProvingProvider` when present, else HTTP proof-server (same as CLI deploy harness).
  */
 export async function buildObsidianMidnightProviders(
   getLace: GetLaceConnection,
