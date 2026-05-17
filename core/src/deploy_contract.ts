@@ -1,9 +1,9 @@
 /**
  * Deploy Obsidian to the configured Midnight network and print the contract address.
  *
- * Prerequisites: `yarn env:up`, `DEPLOY_SEED` in ../.env
- *
- * Usage (from core/): yarn deploy:contracts
+ * Local: `yarn env:up`, `DEPLOY_SEED` in ../.env, then `yarn deploy:contracts`
+ * Preprod: funded wallet + DUST, proof server on :6300, then `yarn deploy:preprod`
+ *   https://docs.midnight.network/guides/deploy-mn-app
  */
 import { WebSocket } from 'ws';
 import { setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
@@ -39,7 +39,7 @@ async function main(): Promise<void> {
   setNetworkId(config.networkId);
 
   const envConfig: EnvironmentConfiguration = {
-    walletNetworkId: config.networkId,
+    walletNetworkId: config.walletNetworkId,
     networkId: config.networkId,
     indexer: config.indexer,
     indexerWS: config.indexerWS,
@@ -49,9 +49,28 @@ async function main(): Promise<void> {
     proofServer: config.proofServer,
   };
 
+  if (config.networkId === 'preprod') {
+    logger.info(
+      {
+        faucet: config.faucet,
+        proofServer: config.proofServer,
+      },
+      'Preprod deploy — fund wallet at faucet and ensure proof server is running',
+    );
+  }
+
   const wallet = await MidnightWalletProvider.build(logger, envConfig, seed);
   await wallet.start();
-  await syncWallet(logger, wallet.wallet, 600_000);
+
+  const syncTimeoutMs =
+    config.networkId === 'preprod'
+      ? Number(process.env['WALLET_SYNC_TIMEOUT_MS'] ?? 180_000)
+      : 600_000;
+
+  await syncWallet(logger, wallet.wallet, {
+    timeoutMs: syncTimeoutMs,
+    logThrottleMs: config.networkId === 'preprod' ? 5_000 : 2_000,
+  });
 
   const providers = buildProviders(wallet, zkConfigPath, config);
 

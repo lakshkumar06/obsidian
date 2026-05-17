@@ -13,6 +13,7 @@
     "validate": "yarn env:up && yarn test:local; yarn env:down",
     "relayer": "yarn --cwd core relayer",
     "deploy:contracts": "yarn --cwd core deploy:contracts",
+    "deploy:preprod": "yarn --cwd core deploy:preprod",
     "submit:pair": "yarn --cwd core submit:pair",
     "match-existing": "yarn --cwd core match-existing"
   },

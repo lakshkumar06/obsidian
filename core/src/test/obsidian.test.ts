@@ -60,7 +60,7 @@ describe('Obsidian Contract', () => {
     setNetworkId(config.networkId);
 
     const envConfig: EnvironmentConfiguration = {
-      walletNetworkId: config.networkId,
+      walletNetworkId: config.walletNetworkId,
       networkId: config.networkId,
       indexer: config.indexer,
       indexerWS: config.indexerWS,

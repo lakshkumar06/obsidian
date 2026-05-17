@@ -14,6 +14,7 @@
     "validate": "yarn env:up && yarn test:local; yarn env:down",
     "relayer": "NODE_OPTIONS='--experimental-vm-modules' node --env-file=../.env ./node_modules/.bin/tsx src/matching_relayer_daemon.ts",
     "deploy:contracts": "MIDNIGHT_NETWORK=local NODE_OPTIONS='--experimental-vm-modules' node --env-file=../.env ./node_modules/.bin/tsx src/deploy_contract.ts",
+    "deploy:preprod": "MIDNIGHT_NETWORK=preprod NODE_OPTIONS='--experimental-vm-modules --max-old-space-size=4096' node --env-file=../.env ./node_modules/.bin/tsx src/deploy_contract.ts",
     "submit:pair": "MIDNIGHT_NETWORK=local NODE_OPTIONS='--experimental-vm-modules' node --env-file=../.env ./node_modules/.bin/tsx src/submit_crossing_pair.ts",
     "match-existing": "MIDNIGHT_NETWORK=local NODE_OPTIONS='--experimental-vm-modules' node --env-file=../.env ./node_modules/.bin/tsx src/match_existing_pair.ts"
   },

@@ -2,11 +2,14 @@
 .env
 .env.local
 .env.*.local
+# Never commit wallet seeds, funded-wallet output, or local deploy artifacts
+tools/midnight-fund/FUNDED_WALLET.json
+**/deployment.json
+node_modules/
 /core/node_modules
 /core/contracts/managed
 /core/logs
 /core/midnight-level-db
-/core/deployment.json
 /frontend/node_modules
 /frontend/dist
 /frontend/public/zk

@@ -74,9 +74,11 @@ export class MidnightWalletProvider implements MidnightProvider, WalletProvider 
     env: EnvironmentConfiguration,
     seed: string,
   ): Promise<MidnightWalletProvider> {
+    const isPreprod = env.networkId === 'preprod';
     const dustOptions: DustWalletOptions = {
       ledgerParams: LedgerParameters.initialParameters(),
-      additionalFeeOverhead: 1_000n,
+      // Preprod deploy txs need higher fee headroom (Midnight deploy guide).
+      additionalFeeOverhead: isPreprod ? 300_000_000_000_000n : 1_000n,
       feeBlocksMargin: 5,
     };
 
@@ -115,45 +117,90 @@ function isProgressStrictlyComplete(progress: unknown): boolean {
   return (candidate.isStrictlyComplete as () => boolean)();
 }
 
+export type SyncWalletFlags = {
+  shielded: boolean;
+  unshielded: boolean;
+  dust: boolean;
+  isSynced: boolean;
+};
+
+export function syncWalletFlags(state: FacadeState): SyncWalletFlags {
+  const shielded = isProgressStrictlyComplete(state.shielded.state.progress);
+  const unshielded = isProgressStrictlyComplete(state.unshielded.progress);
+  const dust = isProgressStrictlyComplete(state.dust.state.progress);
+  return { shielded, unshielded, dust, isSynced: state.isSynced };
+}
+
+export type SyncWalletOptions = {
+  timeoutMs?: number;
+  /** Throttle progress logs (avoids OOM on chatty preprod indexer streams). */
+  logThrottleMs?: number;
+};
+
+function formatSyncTimeoutError(
+  last: FacadeState | undefined,
+  emissionCount: number,
+  timeoutMs: number,
+  networkId?: string,
+): string {
+  const flags = last ? syncWalletFlags(last) : null;
+  const progress = flags
+    ? `shielded=${flags.shielded}, unshielded=${flags.unshielded}, dust=${flags.dust}`
+    : 'no state received';
+  const lines = [
+    `Wallet sync timed out after ${timeoutMs}ms (${emissionCount} state emissions).`,
+    `Last progress: ${progress}.`,
+  ];
+  if (networkId === 'preprod') {
+    lines.push(
+      'Preprod deploy needs a funded wallet with DUST (gas):',
+      '1. Fund tNight — https://faucet.preprod.midnight.network/',
+      '2. Register unshielded UTXOs for DUST (see https://docs.midnight.network/guides/deploy-mn-app)',
+      '3. Wait until shielded + dust sync complete, then re-run yarn deploy:preprod',
+      'Optional: WALLET_SYNC_TIMEOUT_MS=300000 for a longer wait.',
+    );
+  }
+  return lines.join('\n');
+}
+
+/** @param optionsOrTimeoutMs number kept for call sites that pass timeout only */
 export async function syncWallet(
   logger: Logger,
   wallet: WalletFacade,
-  timeout = 300_000,
+  optionsOrTimeoutMs: SyncWalletOptions | number = {},
 ): Promise<FacadeState> {
-  logger.info('Syncing wallet...');
+  const options: SyncWalletOptions =
+    typeof optionsOrTimeoutMs === 'number'
+      ? { timeoutMs: optionsOrTimeoutMs }
+      : optionsOrTimeoutMs;
+  const timeoutMs = options.timeoutMs ?? 300_000;
+  const logThrottleMs = options.logThrottleMs ?? 5_000;
+  const networkId = process.env['MIDNIGHT_NETWORK']?.trim();
+
+  logger.info({ timeoutMs, logThrottleMs }, 'Syncing wallet...');
   let emissionCount = 0;
+  let lastState: FacadeState | undefined;
+
   return Rx.firstValueFrom(
     wallet.state().pipe(
       Rx.tap((state: FacadeState) => {
         emissionCount++;
-        const shielded = isProgressStrictlyComplete(state.shielded.state.progress);
-        const unshielded = isProgressStrictlyComplete(state.unshielded.progress);
-        const dust = isProgressStrictlyComplete(state.dust.state.progress);
-        logger.info(
-          `Wallet sync [${emissionCount}]: shielded=${shielded}, unshielded=${unshielded}, dust=${dust}`,
-        );
-        if (!shielded) {
-          logger.debug(`  shielded.progress: ${JSON.stringify(state.shielded.state.progress)}`);
-        }
-        if (!unshielded) {
-          logger.debug(`  unshielded.progress: ${JSON.stringify(state.unshielded.progress)}`);
-        }
-        if (!dust) {
-          logger.debug(`  dust.progress: ${JSON.stringify(state.dust.state.progress)}`);
-        }
+        lastState = state;
       }),
-      Rx.filter(
-        (state: FacadeState) =>
-          isProgressStrictlyComplete(state.shielded.state.progress) &&
-          isProgressStrictlyComplete(state.dust.state.progress) &&
-          isProgressStrictlyComplete(state.unshielded.progress),
-      ),
+      Rx.throttleTime(logThrottleMs, undefined, { leading: true, trailing: true }),
+      Rx.tap((state: FacadeState) => {
+        const flags = syncWalletFlags(state);
+        logger.info(
+          `Wallet sync [${emissionCount}]: shielded=${flags.shielded}, unshielded=${flags.unshielded}, dust=${flags.dust}, isSynced=${flags.isSynced}`,
+        );
+      }),
+      Rx.filter((state: FacadeState) => state.isSynced),
       Rx.tap(() => logger.info(`Wallet sync complete after ${emissionCount} emissions`)),
       Rx.timeout({
-        each: timeout,
+        each: timeoutMs,
         with: () =>
-          Rx.throwError(
-            () => new Error(`Wallet sync timeout after ${timeout}ms (${emissionCount} emissions received)`),
+          Rx.throwError(() =>
+            new Error(formatSyncTimeoutError(lastState, emissionCount, timeoutMs, networkId)),
           ),
       }),
       Rx.catchError((err) => {

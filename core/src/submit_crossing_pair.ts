@@ -164,7 +164,7 @@ async function main(): Promise<void> {
   );
 
   const envConfig: EnvironmentConfiguration = {
-    walletNetworkId: config.networkId,
+    walletNetworkId: config.walletNetworkId,
     networkId: config.networkId,
     indexer: config.indexer,
     indexerWS: config.indexerWS,
