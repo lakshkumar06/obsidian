@@ -3,6 +3,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import App from './App';
+import './styles/global.css';
 
 if (!('Buffer' in globalThis)) {
   (globalThis as unknown as { Buffer: typeof Buffer }).Buffer = Buffer;

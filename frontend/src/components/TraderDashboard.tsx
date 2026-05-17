@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import { submitCallTx } from '@midnight-ntwrk/midnight-js-contracts';
 import type { MidnightProviders } from '@midnight-ntwrk/midnight-js-types';
 import type { ContractAddress } from '@midnight-ntwrk/compact-runtime';
@@ -12,19 +12,19 @@ import {
 import { formatMidnightError } from '../formatMidnightError';
 import {
   enrichOrderLedgerStatuses,
-  formatLifecyclePhase,
   pollOrderLedgerStatus,
 } from '../ledgerStatus';
-import { tryAutoMatchAndSettle, tryAutoSettlePendingMatch, type AutoMatchStep } from '../autoMatch';
+import { tryAutoMatchAndSettle, tryAutoSettlePendingMatch } from '../autoMatch';
 import { findCounterparty } from '../orderMatcher';
 import { explainQueueNoMatch, isQueuedInPool, reconcileQueueStatus } from '../orderMatcher';
-import { LACE_SIGNING_EXPLAINER, laceApprovalMessage } from '../laceApprovalHint';
-import { fetchRelayerActivity, registerOrderWithRelayer } from '../registerRelayerIntent';
-import { setLaceWalletStepListener, type LaceWalletStep } from '../laceMidnightBridge';
-import { preflightRetryMatch, type MatchDiagnosticLine } from '../matchDiagnostics';
+import { registerOrderWithRelayer } from '../registerRelayerIntent';
 import { assetIdFromSymbol, parseLimitPriceToUint64 } from '../obsidianBytes';
+import { watchTxnActivity, type TxnActivityWatcher } from '../txnActivity';
+import type { AutoMatchStep } from '../autoMatch';
 import type { OrderRow, OrderSide } from '../types';
-import { OperatorPanel } from './OperatorPanel';
+import { IconChevronDown } from './icons';
+import { OrderTicket, orderPlacedTagline, orderTicketStatus } from './OrderTicket';
+import { TxnLoadingScreen } from './TxnLoadingScreen';
 
 type DashboardProps = {
   orders: OrderRow[];
@@ -32,15 +32,18 @@ type DashboardProps = {
   midnightProviders: MidnightProviders | null;
   contractAddressDraft: string;
   providersBusy: boolean;
-  providersBlockedReason: string | null;
+  isConnected: boolean;
+  onConnectClick: () => void;
+  onOrderPlacedVisible?: (visible: boolean) => void;
+  onTxnLoadingVisible?: (visible: boolean) => void;
 };
 
-const cardStyle: React.CSSProperties = {
-  flex: '1 1 320px',
-  background: '#FFF',
-  padding: '20px',
-  borderRadius: '8px',
-  boxShadow: '0 2px 4px rgba(0,0,0,0.05)',
+const MATCH_STEP_ACTIVITY: Partial<Record<AutoMatchStep, string>> = {
+  'settle-check': 'tx.settling',
+  'find-pair': 'tx.finding_match',
+  propose_match: 'tx.propose_match',
+  atomic_settle: 'tx.settling',
+  poll: 'tx.settling',
 };
 
 function randomBytes32(): Uint8Array {
@@ -49,28 +52,16 @@ function randomBytes32(): Uint8Array {
   return buf;
 }
 
-function relayerIntentSnippet(order: OrderRow): string {
-  const record: Record<string, string> = {
-    commitmentHex: order.commitmentHex ?? '',
-    assetIdHex: order.assetIdHex ?? '',
-    side: order.side,
-  };
-  if (order.side === 'BUY' && order.boundPrice) {
-    record.maxPrice = order.boundPrice;
-  }
-  if (order.side === 'SELL' && order.boundPrice) {
-    record.minPrice = order.boundPrice;
-  }
-  return JSON.stringify(record, null, 2);
-}
-
 export function TraderDashboard({
   orders,
   setOrders,
   midnightProviders,
   contractAddressDraft,
   providersBusy,
-  providersBlockedReason,
+  isConnected,
+  onConnectClick,
+  onOrderPlacedVisible,
+  onTxnLoadingVisible,
 }: DashboardProps) {
   const [asset, setAsset] = useState('wETH');
   const [side, setSide] = useState<OrderSide>('BUY');
@@ -78,173 +69,126 @@ export function TraderDashboard({
   const [price, setPrice] = useState('');
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [polling, setPolling] = useState(false);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [autoMatchMessage, setAutoMatchMessage] = useState<string | null>(null);
-  const [autoMatchBusy, setAutoMatchBusy] = useState(false);
-  const [matchLog, setMatchLog] = useState<MatchDiagnosticLine[]>([]);
-  const [showMatchLog, setShowMatchLog] = useState(true);
-  const [laceApprovalHint, setLaceApprovalHint] = useState<string | null>(null);
-  const [lacePromptCount, setLacePromptCount] = useState(0);
-  const [submitPhase, setSubmitPhase] = useState<string | null>(null);
+  const [statusHint, setStatusHint] = useState<string | null>(null);
+  const [ticketOrderId, setTicketOrderId] = useState<string | null>(null);
+  const [txnLoading, setTxnLoading] = useState(false);
+  const [txnStatusLabel, setTxnStatusLabel] = useState('Submitting order');
   const autoMatchBusyRef = useRef(false);
+  const submitFlowBusyRef = useRef(false);
+  const txnWatcherRef = useRef<TxnActivityWatcher | null>(null);
   const pollMatchCooldownRef = useRef(0);
+
+  const POST_SUBMIT_MATCH_GRACE_MS = 90_000;
+  const POST_SUBMIT_QUEUED_GRACE_MS = 12_000;
 
   const trimmedAddr = contractAddressDraft.trim();
   const ordersRef = useRef(orders);
   ordersRef.current = orders;
 
   useEffect(() => {
-    setLaceWalletStepListener((step: LaceWalletStep) => {
-      setLacePromptCount((n) => {
-        const next = n + 1;
-        const msg = `Lace ${step} (${next} wallet step this session — expect more if match/settle runs)`;
-        setLaceApprovalHint(msg);
-        console.info(`[Obsidian] ${msg}`);
-        return next;
-      });
-    });
-    return () => setLaceWalletStepListener(null);
-  }, []);
+    onOrderPlacedVisible?.(ticketOrderId !== null);
+  }, [ticketOrderId, onOrderPlacedVisible]);
 
-  const appendMatchLog = useCallback((level: MatchDiagnosticLine['level'], message: string) => {
-    const line: MatchDiagnosticLine = {
-      at: new Date().toLocaleTimeString(),
-      level,
-      message,
+  useEffect(() => {
+    onTxnLoadingVisible?.(txnLoading);
+  }, [txnLoading, onTxnLoadingVisible]);
+
+  useEffect(() => {
+    return () => {
+      txnWatcherRef.current?.stop();
     };
-    console.info(`[Obsidian match] ${line.at} ${message}`);
-    setMatchLog((prev) => [...prev.slice(-80), line]);
   }, []);
 
-  const onMatchProgress = useCallback(
-    (step: AutoMatchStep, detail: string) => {
-      appendMatchLog('info', `[${step}] ${detail}`);
-    },
-    [appendMatchLog],
-  );
-
-  const onWalletApproval = useCallback(
-    (circuit: 'propose_match' | 'atomic_settle') => {
-      const msg = laceApprovalMessage(circuit, { index: circuit === 'propose_match' ? 2 : 3, total: 3 });
-      setLaceApprovalHint(msg);
-      appendMatchLog('info', msg);
-    },
-    [appendMatchLog],
-  );
+  const canSubmit =
+    isConnected &&
+    Boolean(midnightProviders) &&
+    !providersBusy &&
+    !submitting &&
+    !txnLoading &&
+    trimmedAddr.length > 0 &&
+    qty.trim().length > 0 &&
+    price.trim().length > 0;
 
   const runAutoMatch = useCallback(
-    async (triggerOrderId?: string, snapshot?: OrderRow[], source = 'auto') => {
+    async (
+      triggerOrderId?: string,
+      snapshot?: OrderRow[],
+      activity?: TxnActivityWatcher | null,
+    ): Promise<boolean> => {
       const base = snapshot ?? ordersRef.current;
-
-      if (!midnightProviders) {
-        appendMatchLog('error', `${source}: aborted — wallet/proving stack not ready.`);
-        setAutoMatchMessage('Connect Lace and wait for “Wallet / proving stack ready”.');
-        return;
-      }
-      if (trimmedAddr.length === 0) {
-        appendMatchLog('error', `${source}: aborted — no contract address.`);
-        setAutoMatchMessage('Set contract address in .env or header field.');
-        return;
-      }
       if (autoMatchBusyRef.current) {
-        appendMatchLog(
-          'warn',
-          `${source}: skipped — match already in progress (ZK steps can take 1–3 minutes).`,
-        );
-        return;
+        return false;
+      }
+
+      if (!midnightProviders || trimmedAddr.length === 0) {
+        return false;
       }
       try {
         assertIsContractAddress(trimmedAddr);
       } catch {
-        appendMatchLog('error', `${source}: contract address failed parse.`);
-        setAutoMatchMessage('Invalid contract address.');
-        return;
+        return false;
       }
 
       const contractAddress = trimmedAddr as ContractAddress;
       autoMatchBusyRef.current = true;
-      setAutoMatchBusy(true);
-      appendMatchLog('info', `${source}: starting match pipeline on ${base.length} order(s)…`);
+      activity?.pushLocal({ type: 'tx.finding_match' });
 
+      let matched = false;
       try {
+        const onProgress = (step: AutoMatchStep, detail: string) => {
+          const type = MATCH_STEP_ACTIVITY[step] ?? 'tx.finding_match';
+          activity?.pushLocal({ type, detail });
+        };
         let settleResult = await tryAutoSettlePendingMatch({
           providers: midnightProviders,
           contractAddress,
           orders: base,
-          onProgress: onMatchProgress,
+          onProgress,
         });
         let working = settleResult.orders;
-        if (settleResult.matched) {
-          appendMatchLog('ok', settleResult.message || 'Pending settle completed.');
-          setAutoMatchMessage(settleResult.message);
-        } else {
-          appendMatchLog('info', 'No pending settle — searching for new cross…');
+        if (!settleResult.matched) {
           const matchResult = await tryAutoMatchAndSettle({
             providers: midnightProviders,
             contractAddress,
             orders: working,
             triggerOrderId,
-            onProgress: onMatchProgress,
-            onWalletApproval,
+            onProgress,
+            onWalletApproval: (circuit) => {
+              activity?.pushLocal({
+                type: 'tx.wallet_confirm',
+                detail:
+                  circuit === 'propose_match'
+                    ? 'Confirm match in wallet'
+                    : 'Confirm settlement in wallet',
+              });
+            },
           });
           working = matchResult.orders;
-          appendMatchLog(matchResult.matched ? 'ok' : 'warn', matchResult.message);
-          setAutoMatchMessage(matchResult.message);
+          matched = matchResult.matched;
+          if (!matchResult.matched && matchResult.message) {
+            console.info('[Obsidian]', matchResult.message);
+          }
+        } else {
+          matched = true;
+        }
+        if (matched) {
+          activity?.pushLocal({ type: 'match.settle_ok' });
         }
         setOrders(enrichOrderLedgerStatuses(working));
+        return matched;
       } catch (err) {
-        const msg = formatMidnightError(err);
-        appendMatchLog('error', `${source}: exception — ${msg}`);
-        setAutoMatchMessage(msg);
-        console.error('[Obsidian] runAutoMatch failed', err);
+        console.error('[Obsidian] auto-match', err);
+        activity?.pushLocal({
+          type: 'tx.failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return false;
       } finally {
         autoMatchBusyRef.current = false;
-        setAutoMatchBusy(false);
-        appendMatchLog('info', `${source}: finished.`);
       }
     },
-    [midnightProviders, trimmedAddr, setOrders, appendMatchLog, onMatchProgress, onWalletApproval],
+    [midnightProviders, trimmedAddr, setOrders],
   );
-
-  async function handleLoadRelayerActivity() {
-    const events = await fetchRelayerActivity(80);
-    if (events.length === 0) {
-      appendMatchLog('warn', 'No relayer activity — is `yarn relayer` running on :3033?');
-      return;
-    }
-    appendMatchLog('info', `Relayer activity (${events.length} events, all browsers):`);
-    for (const ev of events.slice(-25)) {
-      const row = ev as { ts?: string; type?: string; commitmentHex?: string; buyerHex?: string; sellerHex?: string };
-      appendMatchLog(
-        'info',
-        `${row.ts ?? '?'} ${row.type ?? 'event'} ${row.commitmentHex?.slice(0, 12) ?? ''} ${row.buyerHex?.slice(0, 8) ?? ''} ${row.sellerHex?.slice(0, 8) ?? ''}`.trim(),
-      );
-    }
-  }
-
-  function handleRetryMatchClick() {
-    const snapshot = ordersRef.current;
-    const preflight = preflightRetryMatch({
-      hasProviders: Boolean(midnightProviders),
-      contractAddress: trimmedAddr,
-      alreadyBusy: autoMatchBusyRef.current,
-      pool: snapshot,
-    });
-    setMatchLog(preflight);
-    setShowMatchLog(true);
-    for (const line of preflight) {
-      console.info(`[Obsidian match] ${line.at} ${line.message}`);
-    }
-    if (preflight.some((l) => l.level === 'error')) {
-      setAutoMatchMessage(preflight.find((l) => l.level === 'error')?.message ?? 'Cannot retry.');
-      return;
-    }
-    if (preflight.some((l) => l.level === 'warn' && l.message.includes('already running'))) {
-      return;
-    }
-    void runAutoMatch(undefined, snapshot, 'retry-button');
-  }
 
   const refreshLedgerStatuses = useCallback(async () => {
     const snapshot = ordersRef.current;
@@ -257,7 +201,6 @@ export function TraderDashboard({
       return;
     }
     const contractAddress = trimmedAddr as ContractAddress;
-    setPolling(true);
     try {
       const updates = await Promise.all(
         snapshot.map(async (order) => {
@@ -277,24 +220,19 @@ export function TraderDashboard({
 
       const diagnosis = explainQueueNoMatch(enriched);
       const queuedCount = enriched.filter(isQueuedInPool).length;
-      const pollCooldownMs = 90_000;
       if (
         queuedCount >= 2 &&
         diagnosis.includes('Cross found') &&
         !autoMatchBusyRef.current &&
-        Date.now() - pollMatchCooldownRef.current > pollCooldownMs
+        Date.now() - pollMatchCooldownRef.current > 90_000
       ) {
         pollMatchCooldownRef.current = Date.now();
-        appendMatchLog(
-          'warn',
-          `Poll: ${queuedCount} queued legs cross but still on-chain — auto-running match…`,
-        );
-        void runAutoMatch(undefined, enriched, 'poll-cross');
+        void runAutoMatch(undefined, enriched);
       }
-    } finally {
-      setPolling(false);
+    } catch {
+      /* ignore poll errors */
     }
-  }, [midnightProviders, trimmedAddr, setOrders, runAutoMatch, appendMatchLog]);
+  }, [midnightProviders, trimmedAddr, setOrders, runAutoMatch]);
 
   useEffect(() => {
     if (!midnightProviders || orders.length === 0 || trimmedAddr.length === 0) {
@@ -313,85 +251,77 @@ export function TraderDashboard({
       prevOrderCountRef.current = orders.length;
       return;
     }
+    if (txnLoading || submitFlowBusyRef.current) {
+      prevOrderCountRef.current = orders.length;
+      return;
+    }
     if (orders.length > prevOrderCountRef.current) {
       const snap = ordersRef.current;
-      const queued = snap.filter(isQueuedInPool);
-      if (queued.length >= 1 && !autoMatchBusyRef.current) {
-        void runAutoMatch(undefined, snap, 'new-order');
+      if (snap.filter(isQueuedInPool).length >= 1 && !autoMatchBusyRef.current) {
+        void runAutoMatch(undefined, snap);
       }
     }
     prevOrderCountRef.current = orders.length;
-  }, [midnightProviders, trimmedAddr, orders.length, runAutoMatch]);
+  }, [midnightProviders, trimmedAddr, orders.length, runAutoMatch, txnLoading]);
 
   async function handleSubmitOrder(e: React.FormEvent) {
     e.preventDefault();
     setSubmitError(null);
-    if (!midnightProviders) {
-      window.alert('Connect Lace and wait for “Wallet / proving stack ready”.');
+
+    if (!isConnected || !midnightProviders) {
+      onConnectClick();
       return;
     }
 
     try {
       assertIsContractAddress(trimmedAddr);
     } catch {
-      window.alert(`Contract address doesn't parse — paste OBSIDIAN_CONTRACT_ADDRESS from yarn demo:contracts.`);
+      setSubmitError('Contract not configured');
       return;
     }
 
-    let boundPrice: bigint;
     try {
-      boundPrice = parseLimitPriceToUint64(price);
+      parseLimitPriceToUint64(price);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setSubmitError(msg);
+      setSubmitError(err instanceof Error ? err.message : String(err));
       return;
     }
-
-    const commitment = randomBytes32();
-    const nullifier = randomBytes32();
-    const assetId = await assetIdFromSymbol(asset);
-    const orderId =
-      typeof crypto.randomUUID === 'function'
-        ? crypto.randomUUID()
-        : btoa(Math.random().toString()).substring(0, 12);
-
-    const draftForPreview: OrderRow = {
-      id: 'draft',
-      asset,
-      qty,
-      price,
-      side,
-      assetIdHex: toHex(assetId),
-      boundPrice: boundPrice.toString(),
-      status: 'draft',
-      queueStatus: 'queued',
-    };
-    const willCross = findCounterparty(draftForPreview, ordersRef.current) !== null;
 
     setSubmitting(true);
-    setLacePromptCount(0);
-    setSubmitPhase(
-      willCross
-        ? 'Step 1/3: approve submit_order in Lace — then match + settle will auto-run (2 more prompts)'
-        : 'Approve submit_order in Lace',
-    );
-    setLaceApprovalHint(
-      willCross
-        ? laceApprovalMessage('submit_order', { index: 1, total: 3 }) +
-          ' Then keep Lace open for propose_match and atomic_settle.'
-        : laceApprovalMessage('submit_order'),
-    );
+    setTxnLoading(true);
+    setTxnStatusLabel('Submitting order');
+    setStatusHint(null);
+
     try {
       const contractAddress = trimmedAddr as ContractAddress;
-      await ensureObsidianCallPrivateState(midnightProviders, contractAddress);
+      const boundPrice = parseLimitPriceToUint64(price);
+      const commitment = randomBytes32();
+      const nullifier = randomBytes32();
+      const commitmentHex = toHex(commitment);
+      const assetId = await assetIdFromSymbol(asset);
+      const orderId =
+        typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : btoa(Math.random().toString()).substring(0, 12);
 
-      const finalized = await submitCallTx(midnightProviders, {
+      txnWatcherRef.current?.stop();
+      const watcher = watchTxnActivity(commitmentHex, setTxnStatusLabel);
+      txnWatcherRef.current = watcher;
+      submitFlowBusyRef.current = true;
+      watcher.pushLocal({ type: 'tx.submit_start' });
+      watcher.pushLocal({ type: 'tx.wallet_confirm', detail: 'Confirm order in wallet' });
+
+      await ensureObsidianCallPrivateState(midnightProviders!, contractAddress);
+
+      const finalized = await submitCallTx(midnightProviders!, {
         compiledContract: CompiledObsidianContract,
         contractAddress,
         privateStateId: OBSIDIAN_BROWSER_PRIVATE_STATE_ID,
         circuitId: 'submit_order',
         args: [commitment, nullifier],
       } as never);
+
+      watcher.pushLocal({ type: 'tx.submit_ok' });
 
       const newOrder: OrderRow = {
         id: orderId,
@@ -401,10 +331,10 @@ export function TraderDashboard({
         side,
         assetIdHex: toHex(assetId),
         boundPrice: boundPrice.toString(),
-        status: String(finalized.public.status),
-        commitmentHex: toHex(commitment),
+        status: String((finalized as { public?: { status?: string } }).public?.status ?? 'submitted'),
+        commitmentHex,
         nullifierHex: toHex(nullifier),
-        txId: finalized.public.txId,
+        txId: (finalized as { public?: { txId?: string } }).public?.txId,
         createdAt: new Date().toISOString(),
         queueStatus: 'queued',
         ledgerStatus: {
@@ -414,439 +344,217 @@ export function TraderDashboard({
           pollError: null,
         },
       };
-      setQty('');
-      setPrice('');
-      const { status } = await pollOrderLedgerStatus(midnightProviders, contractAddress, newOrder);
-      const withLedger = {
-        ...newOrder,
-        ledgerStatus: status,
-      };
+
+      const { status } = await pollOrderLedgerStatus(midnightProviders!, contractAddress, newOrder);
+      const withLedger = { ...newOrder, ledgerStatus: status };
       const nextOrders = enrichOrderLedgerStatuses([...ordersRef.current, withLedger]);
       setOrders(nextOrders);
-      void registerOrderWithRelayer(withLedger);
-      if (willCross) {
-        setSubmitPhase('Steps 2–3: auto match + settle — watch Lace for propose_match, then atomic_settle');
-        setAutoMatchMessage('submit_order done — running propose_match → atomic_settle automatically…');
-      } else {
-        setAutoMatchMessage('Submitted — queued until a crossing counterparty is submitted.');
-      }
-      await new Promise((r) => setTimeout(r, 800));
       ordersRef.current = nextOrders;
-      await runAutoMatch(orderId, nextOrders, 'after-submit');
-    } catch (err) {
-      const msg = formatMidnightError(err);
-      console.error('[Obsidian] submit_order failed', err);
-      if (err instanceof Error && err.cause !== undefined) {
-        console.error('[Obsidian] submit_order cause', err.cause);
+      await registerOrderWithRelayer(withLedger);
+
+      const tryRunMatch = async (): Promise<boolean> => {
+        const snap = ordersRef.current;
+        const self = snap.find((o) => o.id === orderId) ?? withLedger;
+        if (!findCounterparty(self, snap)) {
+          return false;
+        }
+        watcher.pushLocal({ type: 'tx.finding_match' });
+        return runAutoMatch(orderId, snap, watcher);
+      };
+
+      const refreshSubmittedOrder = async (): Promise<OrderRow> => {
+        const row = ordersRef.current.find((o) => o.id === orderId) ?? withLedger;
+        const { status } = await pollOrderLedgerStatus(midnightProviders!, contractAddress, row);
+        const updated = reconcileQueueStatus({ ...row, ledgerStatus: status });
+        const merged = enrichOrderLedgerStatuses(
+          ordersRef.current.map((o) => (o.id === orderId ? updated : o)),
+        );
+        ordersRef.current = merged;
+        setOrders(merged);
+        return merged.find((o) => o.id === orderId) ?? updated;
+      };
+
+      let outcome: 'settled' | 'queued' = 'queued';
+      if (await tryRunMatch()) {
+        outcome = 'settled';
+      } else {
+        const started = Date.now();
+        let matchTouched = false;
+
+        while (Date.now() - started < POST_SUBMIT_MATCH_GRACE_MS) {
+          const fresh = await refreshSubmittedOrder();
+          if (orderTicketStatus(fresh) === 'settled') {
+            outcome = 'settled';
+            break;
+          }
+          if (
+            fresh.queueStatus === 'matching' ||
+            fresh.queueStatus === 'settling' ||
+            fresh.ledgerStatus?.inMatchLog
+          ) {
+            matchTouched = true;
+          }
+
+          if (!autoMatchBusyRef.current && (await tryRunMatch())) {
+            outcome = 'settled';
+            break;
+          }
+
+          const poolMayMatch = explainQueueNoMatch(ordersRef.current).includes('Cross found');
+          if (
+            !matchTouched &&
+            !poolMayMatch &&
+            Date.now() - started > POST_SUBMIT_QUEUED_GRACE_MS
+          ) {
+            outcome = 'queued';
+            break;
+          }
+
+          await new Promise((r) => setTimeout(r, 500));
+        }
+
+        if (orderTicketStatus(ordersRef.current.find((o) => o.id === orderId) ?? withLedger) === 'settled') {
+          outcome = 'settled';
+        }
       }
-      setSubmitError(msg);
+
+      watcher.pushLocal({ type: outcome === 'settled' ? 'tx.complete' : 'tx.queued' });
+      await new Promise((r) => setTimeout(r, 400));
+
+      setQty('');
+      setPrice('');
+      setTicketOrderId(orderId);
+    } catch (err) {
+      txnWatcherRef.current?.pushLocal({
+        type: 'tx.failed',
+        error: err instanceof Error ? err.message : String(err),
+      });
+      setSubmitError(formatMidnightError(err));
     } finally {
+      submitFlowBusyRef.current = false;
+      txnWatcherRef.current?.stop();
+      txnWatcherRef.current = null;
+      setTxnLoading(false);
       setSubmitting(false);
-      setSubmitPhase(null);
-      setLaceApprovalHint(null);
     }
   }
 
-  function copyText(text: string) {
-    void navigator.clipboard.writeText(text);
+  const ticketOrder = ticketOrderId ? orders.find((o) => o.id === ticketOrderId) : null;
+
+  const primaryLabel = !isConnected
+    ? 'Connect wallet'
+    : providersBusy
+      ? 'Loading…'
+      : side === 'BUY'
+        ? 'Place buy order'
+        : 'Place sell order';
+
+  if (txnLoading) {
+    return <TxnLoadingScreen statusLabel={txnStatusLabel} />;
+  }
+
+  if (ticketOrder) {
+    return (
+      <div className="order-placed-screen" aria-live="polite">
+        <div className="order-placed-layout">
+          <div className="order-placed-copy">
+           
+            <h2 className="order-placed-title">Order placed</h2>
+            <p className="order-placed-tagline">{orderPlacedTagline(ticketOrder)}</p>
+            
+            {statusHint ? <p className="order-placed-status">{statusHint}</p> : null}
+          </div>
+          <div className="order-placed-ticket-wrap">
+            <OrderTicket
+              order={ticketOrder}
+              embedded
+              onDismiss={() => setTicketOrderId(null)}
+            />
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
     <>
-      <div style={{ display: 'flex', gap: '24px', flexWrap: 'wrap' }}>
-        <div style={cardStyle}>
-          <h3>Submit masked order intent (real ledger)</h3>
-          <p style={{ fontSize: '12px', color: '#444', marginBottom: '8px' }}>
-            {LACE_SIGNING_EXPLAINER}
-          </p>
-          <p style={{ fontSize: '12px', color: '#444', marginBottom: '12px' }}>
-            When a cross exists, this page <strong>automatically</strong> calls{' '}
-            <code>propose_match</code> then <code>atomic_settle</code> after your{' '}
-            <code>submit_order</code> — but Lace still requires <strong>3 separate approvals</strong>{' '}
-            (we cannot sign invisibly).
-          </p>
-          {laceApprovalHint ? (
-            <p
-              style={{
-                fontSize: '13px',
-                fontWeight: 'bold',
-                color: '#4A3F7A',
-                background: '#F0EEFF',
-                border: '1px solid #D4CEED',
-                borderRadius: '6px',
-                padding: '10px 12px',
-                marginBottom: '10px',
-              }}
-              role="status"
-            >
-              {laceApprovalHint}
-              {lacePromptCount > 0 ? (
-                <span style={{ display: 'block', fontWeight: 'normal', marginTop: '6px', fontSize: '12px' }}>
-                  Wallet steps this submit: {lacePromptCount}. Full cross ≈ 6 (balance+submit × 3 circuits). If
-                  stuck at 1–2, check the match log — auto match likely did not run.
-                </span>
-              ) : null}
-            </p>
-          ) : null}
-          {submitPhase ? (
-            <p style={{ fontSize: '12px', color: '#8C5C0A', marginBottom: '10px' }} role="status">
-              {submitPhase}
-            </p>
-          ) : null}
-          {autoMatchMessage ? (
-            <p
-              style={{
-                fontSize: '12px',
-                color: autoMatchMessage.toLowerCase().includes('fail') ? '#8B2942' : '#1D6E56',
-                marginBottom: '10px',
-              }}
-              role="status"
-            >
-              {autoMatchBusy ? '⏳ ' : ''}
-              {autoMatchMessage}
-            </p>
-          ) : null}
-          {autoMatchBusy ? (
-            <p style={{ fontSize: '11px', color: '#8C5C0A', marginBottom: '8px' }} role="status">
-              Match in progress — generating ZK proofs (often 30s–3min). Button stays disabled until
-              done; see log below.
-            </p>
-          ) : null}
-          {providersBlockedReason ? (
-            <p style={{ fontSize: '12px', color: '#8B2942', marginBottom: '10px' }} role="alert">
-              {providersBlockedReason}
-            </p>
-          ) : null}
-
-          <form
-            onSubmit={(ev) => {
-              void handleSubmitOrder(ev);
-            }}
-            style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '16px' }}
+      <form className="swap-card" onSubmit={(ev) => void handleSubmitOrder(ev)}>
+        <div className="side-toggle">
+          <button
+            type="button"
+            className={side === 'BUY' ? 'active' : ''}
+            onClick={() => setSide('BUY')}
           >
-            <label htmlFor="obsidian-side">Side</label>
-            <select
-              id="obsidian-side"
-              value={side}
-              onChange={(event) => setSide(event.target.value as OrderSide)}
-              style={{ padding: '8px' }}
-            >
-              <option value="BUY">BUY</option>
-              <option value="SELL">SELL</option>
-            </select>
+            Buy
+          </button>
+          <button
+            type="button"
+            className={side === 'SELL' ? 'active' : ''}
+            onClick={() => setSide('SELL')}
+          >
+            Sell
+          </button>
+        </div>
 
-            <label htmlFor="obsidian-asset">Asset Pair (label + circuit asset id)</label>
-            <select
-              id="obsidian-asset"
-              value={asset}
-              onChange={(event) => setAsset(event.target.value)}
-              style={{ padding: '8px' }}
-            >
-              <option value="wETH">wETH (Wrapped Ethereum)</option>
-              <option value="wADA">wADA (Wrapped Cardano)</option>
-            </select>
-
-            <label htmlFor="obsidian-qty">Quantity (label only)</label>
+        <div className="swap-section">
+          <div className="swap-label">Amount</div>
+          <div className="swap-input-row">
             <input
-              id="obsidian-qty"
-              type="number"
+              className="swap-amount"
+              type="text"
+              inputMode="decimal"
               value={qty}
-              onChange={(event) => setQty(event.target.value)}
-              placeholder="0.00"
+              onChange={(e) => setQty(e.target.value)}
+              placeholder="0"
               required
-              style={{ padding: '8px' }}
             />
-
-            <label htmlFor="obsidian-price">
-              Limit price ({side === 'BUY' ? 'max for buyer' : 'min for seller'}, uint64)
-            </label>
-            <input
-              id="obsidian-price"
-              type="number"
-              value={price}
-              onChange={(event) => setPrice(event.target.value)}
-              placeholder="0.00"
-              required
-              style={{ padding: '8px' }}
-            />
-
-            <button
-              type="submit"
-              disabled={submitting || providersBusy || !midnightProviders || trimmedAddr.length === 0}
-              style={{
-                padding: '10px',
-                background: submitting || providersBusy ? '#7a8490' : '#0D1B2A',
-                color: '#FFF',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: submitting || providersBusy ? 'wait' : 'pointer',
-                fontWeight: 'bold',
-              }}
+            <select
+              className="swap-select"
+              value={asset}
+              onChange={(e) => setAsset(e.target.value)}
+              aria-label="Asset"
             >
-              {submitting
-                ? submitPhase ?? 'Submitting & auto-matching…'
-                : 'Submit order (up to 3 Lace prompts if cross)'}
-            </button>
-          </form>
-        </div>
-
-        <div style={cardStyle}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
-            <h3 style={{ margin: 0 }}>Your submitted intents</h3>
-            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-              <button
-                type="button"
-                onClick={() => void refreshLedgerStatuses()}
-                disabled={polling || !midnightProviders || orders.length === 0}
-                style={{
-                  padding: '6px 12px',
-                  fontSize: '12px',
-                  border: '1px solid #ccc',
-                  borderRadius: '4px',
-                  background: '#fff',
-                  cursor: polling ? 'wait' : 'pointer',
-                }}
-              >
-                {polling ? 'Polling indexer…' : 'Refresh on-chain status'}
-              </button>
-              <button
-                type="button"
-                onClick={() => handleRetryMatchClick()}
-                disabled={polling || autoMatchBusy || !midnightProviders}
-                style={{
-                  padding: '6px 12px',
-                  fontSize: '12px',
-                  border: '1px solid #1D6E56',
-                  borderRadius: '4px',
-                  background: autoMatchBusy ? '#d8ebe4' : '#f0faf6',
-                  cursor: autoMatchBusy || polling ? 'wait' : 'pointer',
-                  color: '#1D6E56',
-                  minWidth: '160px',
-                }}
-              >
-                {autoMatchBusy ? 'Matching… (see log)' : 'Retry match queued orders'}
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleLoadRelayerActivity()}
-                disabled={!midnightProviders}
-                style={{
-                  padding: '6px 12px',
-                  fontSize: '12px',
-                  border: '1px solid #4A3F7A',
-                  borderRadius: '4px',
-                  background: '#f5f3ff',
-                  cursor: 'pointer',
-                  color: '#4A3F7A',
-                }}
-                title="Load shared log from yarn relayer (all browsers)"
-              >
-                Relayer activity
-              </button>
-            </div>
-          </div>
-          {matchLog.length > 0 ? (
-            <div style={{ marginBottom: '12px' }}>
-              <button
-                type="button"
-                onClick={() => setShowMatchLog((v) => !v)}
-                style={{
-                  fontSize: '11px',
-                  padding: '4px 8px',
-                  marginBottom: '6px',
-                  border: '1px solid #ccc',
-                  borderRadius: '4px',
-                  background: '#fff',
-                  cursor: 'pointer',
-                }}
-              >
-                {showMatchLog ? 'Hide' : 'Show'} match debug log ({matchLog.length} lines)
-              </button>
-              {showMatchLog ? (
-                <pre
-                  style={{
-                    margin: 0,
-                    padding: '10px',
-                    background: '#1a1a1a',
-                    color: '#e8e8e8',
-                    borderRadius: '6px',
-                    maxHeight: '240px',
-                    overflowY: 'auto',
-                    fontFamily: 'ui-monospace, monospace',
-                    fontSize: '10px',
-                    lineHeight: 1.45,
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                  }}
-                >
-                  {matchLog
-                    .map((line) => {
-                      const tag =
-                        line.level === 'error'
-                          ? 'ERR'
-                          : line.level === 'warn'
-                            ? 'WRN'
-                            : line.level === 'ok'
-                              ? ' OK'
-                              : '   ';
-                      return `${line.at} ${tag} ${line.message}`;
-                    })
-                    .join('\n')}
-                </pre>
-              ) : null}
-            </div>
-          ) : null}
-          {submitError ? (
-            <p style={{ fontSize: '12px', color: '#8B2942', marginBottom: '8px' }} role="alert">
-              {submitError}
-            </p>
-          ) : null}
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', marginTop: '16px', borderCollapse: 'collapse' }}>
-              <thead>
-                <tr style={{ background: '#0D1B2A', color: '#FFF', textAlign: 'left' }}>
-                  <th style={{ padding: '8px' }}>Ticket</th>
-                  <th style={{ padding: '8px' }}>Commitment</th>
-                  <th style={{ padding: '8px' }}>Lifecycle</th>
-                  <th style={{ padding: '8px' }}>Tx</th>
-                </tr>
-              </thead>
-              <tbody>
-                {orders.length === 0 ? (
-                  <tr>
-                    <td colSpan={4} style={{ padding: '12px', color: '#666', fontStyle: 'italic' }}>
-                      No submits yet — orders persist in this browser (localStorage).
-                    </td>
-                  </tr>
-                ) : (
-                  orders.map((order) => (
-                    <Fragment key={order.id}>
-                      <tr
-                        style={{ borderBottom: '1px solid #E0DED8', cursor: 'pointer' }}
-                        onClick={() => setExpandedId(expandedId === order.id ? null : order.id)}
-                      >
-                        <td style={{ padding: '8px', fontSize: '12px' }}>
-                          <strong>{order.side ?? 'BUY'}</strong> {order.qty} {order.asset} @ {order.price}
-                          {order.boundPrice ? (
-                            <span style={{ color: '#666', fontSize: '11px' }}>
-                              {' '}
-                              (bound {order.boundPrice})
-                            </span>
-                          ) : null}
-                        </td>
-                        <td
-                          style={{
-                            padding: '8px',
-                            fontFamily: 'monospace',
-                            fontSize: '10px',
-                            color: '#1D6E56',
-                            wordBreak: 'break-all',
-                          }}
-                          title={order.commitmentHex}
-                        >
-                          {order.commitmentHex ?? '—'}
-                        </td>
-                        <td style={{ padding: '8px', fontSize: '12px', color: '#8C5C0A' }}>
-                          {formatLifecyclePhase(order)}
-                        </td>
-                        <td
-                          style={{
-                            padding: '8px',
-                            fontFamily: 'monospace',
-                            fontSize: '10px',
-                            wordBreak: 'break-all',
-                          }}
-                          title={order.txId}
-                        >
-                          {order.txId ? `${order.txId.slice(0, 12)}…` : '—'}
-                        </td>
-                      </tr>
-                      {expandedId === order.id ? (
-                        <tr>
-                          <td colSpan={4} style={{ padding: '12px', background: '#FAFAF8', fontSize: '11px' }}>
-                            <p style={{ margin: '0 0 8px' }}>
-                              <strong>Nullifier:</strong>{' '}
-                              <code style={{ wordBreak: 'break-all' }}>{order.nullifierHex ?? '—'}</code>
-                            </p>
-                            <p style={{ margin: '0 0 8px' }}>
-                              <strong>Asset id (propose_match):</strong>{' '}
-                              <code style={{ wordBreak: 'break-all' }}>{order.assetIdHex ?? '—'}</code>
-                            </p>
-                            {order.ledgerStatus?.auditCiphertext ? (
-                              <p>
-                                <strong>Audit ciphertext (buyer key):</strong>{' '}
-                                <code>{order.ledgerStatus.auditCiphertext}</code>
-                              </p>
-                            ) : null}
-                            {order.ledgerStatus?.pairedAuditCiphertext ? (
-                              <p>
-                                <strong>Pair audit (buyer anchor):</strong>{' '}
-                                <code>{order.ledgerStatus.pairedAuditCiphertext}</code>
-                                {order.ledgerStatus.pairedBuyerCommitmentHex ? (
-                                  <>
-                                    {' '}
-                                    · buyer{' '}
-                                    <code style={{ fontSize: '10px' }}>
-                                      {order.ledgerStatus.pairedBuyerCommitmentHex.slice(0, 16)}…
-                                    </code>
-                                  </>
-                                ) : null}
-                              </p>
-                            ) : null}
-                            <p style={{ margin: '8px 0 4px' }}>
-                              <strong>Relayer intent JSON</strong> (register via{' '}
-                              <code>MatchingRelayer.registerLocalIntent</code> in core):
-                            </p>
-                            <pre
-                              style={{
-                                background: '#eee',
-                                padding: '8px',
-                                overflow: 'auto',
-                                fontSize: '10px',
-                              }}
-                            >
-                              {relayerIntentSnippet(order)}
-                            </pre>
-                            <button
-                              type="button"
-                              onClick={(ev) => {
-                                ev.stopPropagation();
-                                if (order.commitmentHex) {
-                                  copyText(order.commitmentHex);
-                                }
-                              }}
-                              style={{ marginRight: '8px', fontSize: '11px', padding: '4px 8px' }}
-                            >
-                              Copy commitment hex
-                            </button>
-                            <button
-                              type="button"
-                              onClick={(ev) => {
-                                ev.stopPropagation();
-                                copyText(relayerIntentSnippet(order));
-                              }}
-                              style={{ fontSize: '11px', padding: '4px 8px' }}
-                            >
-                              Copy relayer JSON
-                            </button>
-                          </td>
-                        </tr>
-                      ) : null}
-                    </Fragment>
-                  ))
-                )}
-              </tbody>
-            </table>
+              <option value="wETH">wETH</option>
+              <option value="wADA">wADA</option>
+            </select>
           </div>
         </div>
-      </div>
 
-      <OperatorPanel
-        orders={orders}
-        midnightProviders={midnightProviders}
-        contractAddressDraft={contractAddressDraft}
-        providersBusy={providersBusy}
-      />
+        <div className="swap-divider">
+          <span className="swap-divider-btn" aria-hidden>
+            <IconChevronDown />
+          </span>
+        </div>
+
+        <div className="swap-section">
+          <div className="swap-label">Limit price</div>
+          <div className="swap-input-row">
+            <input
+              className="swap-amount"
+              type="text"
+              inputMode="decimal"
+              value={price}
+              onChange={(e) => setPrice(e.target.value)}
+              placeholder="0"
+              required
+              style={{ fontSize: 28 }}
+            />
+          </div>
+        </div>
+
+        <button
+          type="submit"
+          className={`btn-primary ${canSubmit || !isConnected ? 'ready' : ''}`}
+          disabled={isConnected && !canSubmit}
+          onClick={!isConnected ? (e) => { e.preventDefault(); onConnectClick(); } : undefined}
+        >
+          {primaryLabel}
+        </button>
+      </form>
+
+      <p className={`status-line ${submitError ? 'error' : ''}`}>
+        {submitError ?? statusHint ?? ''}
+      </p>
     </>
   );
 }

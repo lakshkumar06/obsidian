@@ -6,6 +6,8 @@ import {
   commitmentKeyHex,
   hexToBytes32,
   newlyAddedCommitmentKeys,
+  pairIdsTouchingCommitment,
+  removedCommitmentKeys,
 } from '../matching_relayer.js';
 
 function orderMapFrom(
@@ -53,6 +55,17 @@ describe('matching_relayer helpers', () => {
     const b = new Set(['aa', 'bb', 'cc']);
     expect(newlyAddedCommitmentKeys(a, b)).toEqual(['cc']);
     expect(newlyAddedCommitmentKeys(b, b)).toEqual([]);
+  });
+
+  it('removedCommitmentKeys diffs snapshots', () => {
+    const before = new Set(['aa', 'bb', 'cc']);
+    const after = new Set(['aa', 'cc']);
+    expect(removedCommitmentKeys(before, after)).toEqual(['bb']);
+  });
+
+  it('pairIdsTouchingCommitment finds pair ids', () => {
+    const pairs = new Set(['aa:bb', 'bb:cc', 'dd:ee']);
+    expect(pairIdsTouchingCommitment(pairs, 'bb')).toEqual(['aa:bb', 'bb:cc']);
   });
 
   it('hexToBytes32 round-trips lowercase hex', () => {

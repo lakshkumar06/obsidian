@@ -72,6 +72,32 @@ export function startRelayerHttpServer(
       return;
     }
 
+    if (req.method === 'POST' && url.pathname === '/activity') {
+      const chunks: Buffer[] = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        try {
+          const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+          const source = parsed.source === 'ui' || parsed.source === 'relayer' || parsed.source === 'cli'
+            ? parsed.source
+            : 'ui';
+          const type = typeof parsed.type === 'string' ? parsed.type : '';
+          if (!type) {
+            throw new Error('type required');
+          }
+          const { source: _s, type: _t, ...rest } = parsed;
+          appendActivity({ source, type, ...rest });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: msg }));
+        }
+      });
+      return;
+    }
+
     if (req.method === 'POST' && url.pathname === '/intent') {
       const chunks: Buffer[] = [];
       req.on('data', (c) => chunks.push(c));
@@ -105,7 +131,7 @@ export function startRelayerHttpServer(
 
   server.listen(port, '127.0.0.1', () => {
     logger.info(
-      { port, endpoints: ['GET /health', 'GET /activity', 'POST /intent'] },
+      { port, endpoints: ['GET /health', 'GET /activity', 'POST /activity', 'POST /intent'] },
       'Relayer HTTP API (shared intent pool + activity log for multi-browser dev)',
     );
   });

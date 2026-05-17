@@ -57,6 +57,30 @@ export function newlyAddedCommitmentKeys(
   return out;
 }
 
+export function removedCommitmentKeys(
+  previous: Set<string>,
+  current: Set<string>,
+): string[] {
+  const out: string[] = [];
+  for (const k of previous) {
+    if (!current.has(k)) {
+      out.push(k);
+    }
+  }
+  return out;
+}
+
+/** Drop pair ids that reference a commitment no longer on-chain. */
+export function pairIdsTouchingCommitment(pairIds: Iterable<string>, hex: string): string[] {
+  const out: string[] = [];
+  for (const id of pairIds) {
+    if (id.includes(hex)) {
+      out.push(id);
+    }
+  }
+  return out;
+}
+
 function sortedPairId(a: string, b: string): string {
   return a < b ? `${a}:${b}` : `${b}:${a}`;
 }
@@ -69,6 +93,9 @@ export class MatchingRelayer {
   private readonly localizedIntentPool = new Map<string, LocalIntentRecord>();
 
   private previousCommitmentKeys = new Set<string>();
+
+  /** Latest snapshot of active `order_commitments` keys from the indexer. */
+  private activeCommitmentKeys = new Set<string>();
 
   private readonly attemptedPairs = new Set<string>();
 
@@ -108,7 +135,8 @@ export class MatchingRelayer {
       await this.providers.publicDataProvider.queryContractState(this.contractAddress);
     if (initial) {
       const L = ledger(initial.data);
-      this.previousCommitmentKeys = collectActiveCommitmentKeys(L.order_commitments);
+      this.activeCommitmentKeys = collectActiveCommitmentKeys(L.order_commitments);
+      this.previousCommitmentKeys = new Set(this.activeCommitmentKeys);
     }
 
     this.logger.info(
@@ -137,8 +165,14 @@ export class MatchingRelayer {
   private async handleContractState(contractState: ContractState): Promise<void> {
     const L = ledger(contractState.data);
     const currentKeys = collectActiveCommitmentKeys(L.order_commitments);
+    const removedKeys = removedCommitmentKeys(this.previousCommitmentKeys, currentKeys);
     const newKeys = newlyAddedCommitmentKeys(this.previousCommitmentKeys, currentKeys);
     this.previousCommitmentKeys = currentKeys;
+    this.activeCommitmentKeys = currentKeys;
+
+    if (removedKeys.length > 0) {
+      this.pruneSettledIntents(removedKeys);
+    }
 
     for (const commitmentHex of newKeys) {
       appendActivity({
@@ -151,7 +185,28 @@ export class MatchingRelayer {
     }
   }
 
+  private pruneSettledIntents(removedHexes: string[]): void {
+    for (const hex of removedHexes) {
+      if (this.localizedIntentPool.delete(hex)) {
+        this.logger.info({ commitment: hex.slice(0, 16) }, 'Removed settled intent from pool');
+        appendActivity({
+          source: 'relayer',
+          type: 'intent.cleared',
+          commitmentHex: hex,
+          reason: 'settled_or_cleared_on_chain',
+        });
+      }
+      for (const pairId of pairIdsTouchingCommitment(this.attemptedPairs, hex)) {
+        this.attemptedPairs.delete(pairId);
+      }
+    }
+  }
+
   private async evaluatePoolForMatches(newCommitmentHex: string): Promise<void> {
+    if (!this.activeCommitmentKeys.has(newCommitmentHex)) {
+      return;
+    }
+
     const currentIntent = this.localizedIntentPool.get(newCommitmentHex);
     if (!currentIntent) {
       this.logger.debug(
@@ -161,11 +216,11 @@ export class MatchingRelayer {
       return;
     }
 
-    for (const [poolHex, order] of this.localizedIntentPool.entries()) {
-      if (poolHex === newCommitmentHex) {
-        continue;
-      }
+    const candidates = [...this.localizedIntentPool.entries()]
+      .filter(([hex]) => hex !== newCommitmentHex && this.activeCommitmentKeys.has(hex))
+      .sort(([a], [b]) => b.localeCompare(a));
 
+    for (const [poolHex, order] of candidates) {
       const sameAsset = Buffer.from(order.assetId).equals(Buffer.from(currentIntent.assetId));
       const oppositeSide = order.side !== currentIntent.side;
       if (!sameAsset || !oppositeSide) {
@@ -228,10 +283,21 @@ export class MatchingRelayer {
         buyerRecord.assetId,
         sellerRecord.assetId,
       );
-      if (matched) {
-        await this.executeAtomicSettle(hexToBytes32(buyerHex), hexToBytes32(sellerHex));
+      if (!matched) {
+        this.attemptedPairs.delete(pairId);
+        this.pruneInactiveIntents();
+        continue;
       }
+      await this.executeAtomicSettle(hexToBytes32(buyerHex), hexToBytes32(sellerHex));
       break;
+    }
+  }
+
+  private pruneInactiveIntents(): void {
+    for (const hex of [...this.localizedIntentPool.keys()]) {
+      if (!this.activeCommitmentKeys.has(hex)) {
+        this.localizedIntentPool.delete(hex);
+      }
     }
   }
 
@@ -273,14 +339,18 @@ export class MatchingRelayer {
       });
       return true;
     } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
       this.logger.error({ error }, 'propose_match failed (circuit or tx rejected)');
       appendActivity({
         source: 'relayer',
         type: 'match.propose_fail',
         buyerHex: commitmentKeyHex(buyerCommitment),
         sellerHex: commitmentKeyHex(sellerCommitment),
-        error: error instanceof Error ? error.message : String(error),
+        error: msg,
       });
+      if (/RECORD_NOT_FOUND/i.test(msg)) {
+        this.pruneInactiveIntents();
+      }
       return false;
     }
   }
