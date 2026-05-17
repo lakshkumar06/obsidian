@@ -73,6 +73,7 @@ yarn frontend:dev
 | Variable                     | Description                       |
 | ---------------------------- | --------------------------------- |
 | `OBSIDIAN_CONTRACT_ADDRESS`  | Deployed contract hex (required)  |
+| `DEPLOY_SEED`                | Wallet seed for `yarn deploy:contracts` |
 | `RELAYER_SEED`               | Operator wallet seed (relayer)    |
 | `OBSIDIAN_RELAYER_HTTP_PORT` | Relayer API port (default `3033`) |
 
@@ -86,7 +87,7 @@ See `[.env.example](.env.example)`. Do not commit `.env`.
 | ------------------------------- | --------------------------------- |
 | `yarn env:up` / `yarn env:down` | Docker devnet                     |
 | `yarn frontend:dev`             | Vite UI on :5173                  |
-| `yarn deploy:contracts`         | Deploy + full circuit walkthrough |
+| `yarn deploy:contracts`         | Deploy contract (prints address)  |
 | `yarn submit:pair`              | CLI BUY + SELL + match/settle     |
 | `yarn relayer`                  | Matching relayer + HTTP API       |
 | `yarn test:local`               | Vitest on local devnet            |

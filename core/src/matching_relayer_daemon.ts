@@ -4,7 +4,7 @@
  *
  * Env:
  *   OBSIDIAN_CONTRACT_ADDRESS — contract bech32/hex from deployment (required)
- *   RELAYER_SEED — hex seed for operator wallet (default: test seed 0x01…)
+ *   RELAYER_SEED — hex seed for operator wallet (required)
  *   OBSIDIAN_RELAYER_PRIVATE_STATE_ID — private state id (default: RelayerObsidianState)
  */
 import { WebSocket } from 'ws';
@@ -29,9 +29,6 @@ const logger = pino({
   transport: { target: 'pino-pretty' },
 });
 
-const DEFAULT_SEED =
-  '0000000000000000000000000000000000000000000000000000000000000001';
-
 async function main(): Promise<void> {
   const contractAddress = process.env['OBSIDIAN_CONTRACT_ADDRESS']?.trim();
   if (!contractAddress) {
@@ -53,7 +50,11 @@ async function main(): Promise<void> {
     proofServer: config.proofServer,
   };
 
-  const seed = process.env['RELAYER_SEED']?.trim() || DEFAULT_SEED;
+  const seed = process.env['RELAYER_SEED']?.trim();
+  if (!seed) {
+    logger.error('Set RELAYER_SEED in ../.env (hex wallet seed for the matching relayer).');
+    process.exit(1);
+  }
   const privateStateId =
     process.env['OBSIDIAN_RELAYER_PRIVATE_STATE_ID']?.trim() || 'RelayerObsidianState';
 

@@ -27,6 +27,7 @@ Uses `OBSIDIAN_CONTRACT_ADDRESS` from `../.env`.
 |--------|------|---------|
 | `GET` | `/health` | Liveness |
 | `GET` | `/activity?limit=200` | Recent JSONL events |
+| `GET` | `/orders` | Orders persisted by the relayer |
 | `POST` | `/intent` | Register order intent after submit |
 
 Submits auto-POST `/intent` in dev when the relayer is running (Vite proxies `/relayer` → `:3033`).

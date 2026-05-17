@@ -20,7 +20,22 @@ export async function registerOrderWithRelayer(order: OrderRow): Promise<void> {
     commitmentHex: order.commitmentHex,
     assetIdHex: order.assetIdHex,
     side: order.side,
+    id: order.id,
+    asset: order.asset,
+    qty: order.qty,
+    price: order.price,
+    boundPrice: order.boundPrice,
+    createdAt: order.createdAt ?? new Date().toISOString(),
   };
+  if (order.nullifierHex) {
+    body.nullifierHex = order.nullifierHex;
+  }
+  if (order.txId) {
+    body.txId = order.txId;
+  }
+  if (order.status) {
+    body.status = order.status;
+  }
   if (order.side === 'BUY') {
     body.maxPrice = order.boundPrice;
   } else {

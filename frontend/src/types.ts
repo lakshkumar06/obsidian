@@ -27,7 +27,7 @@ export type OrderRow = {
   qty: string;
   price: string;
   side: OrderSide;
-  /** Off-chain matching pool state (auto match after submit) */
+  /** Off-chain matching pool state (relayer-driven) */
   queueStatus?: OrderQueueStatus;
   counterpartyOrderId?: string;
   matchError?: string;

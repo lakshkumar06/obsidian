@@ -13,7 +13,7 @@ import {
   isLikelyNetworkIdMismatch,
 } from './networkHint';
 import { resolveInitialContractAddress } from './contractAddress';
-import { loadStoredOrders, persistOrders } from './orderStorage';
+import { fetchOrdersFromRelayer } from './relayerOrders';
 import type { OrderRow } from './types';
 import {
   listMidnightWalletEntries,
@@ -41,7 +41,7 @@ export default function App() {
   const [walletError, setWalletError] = useState<string | null>(null);
   const [detectedWallets, setDetectedWallets] = useState<WalletEntry[]>([]);
   const [chosenWalletKey, setChosenWalletKey] = useState<string | ''>('');
-  const [orders, setOrders] = useState<OrderRow[]>(() => loadStoredOrders());
+  const [orders, setOrders] = useState<OrderRow[]>([]);
   const [orderPlacedVisible, setOrderPlacedVisible] = useState(false);
   const [txnLoadingVisible, setTxnLoadingVisible] = useState(false);
 
@@ -71,8 +71,28 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    persistOrders(orders);
-  }, [orders]);
+    void (async () => {
+      const fromRelayer = await fetchOrdersFromRelayer();
+      if (fromRelayer.length > 0) {
+        setOrders(fromRelayer);
+      }
+    })();
+    const timer = window.setInterval(() => {
+      void fetchOrdersFromRelayer().then((rows) => {
+        if (rows.length > 0) {
+          setOrders((prev) => {
+            const byId = new Map(prev.map((o) => [o.id, o]));
+            for (const row of rows) {
+              const existing = byId.get(row.id);
+              byId.set(row.id, existing ? { ...row, ledgerStatus: existing.ledgerStatus, queueStatus: existing.queueStatus } : row);
+            }
+            return [...byId.values()];
+          });
+        }
+      });
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (view !== 'trade') {

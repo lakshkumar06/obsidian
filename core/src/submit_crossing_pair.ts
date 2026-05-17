@@ -14,9 +14,9 @@
  *   yarn submit:pair --sell-first      # SELL then BUY
  *
  * Env:
- *   CLI_SEED — wallet seed (default: test seed 0x01…)
- *   CLI_ASSET — symbol (default: wETH)
- *   CLI_PRICE — bound price uint64 (default: 2)
+ *   CLI_SEED — wallet seed (required)
+ *   CLI_ASSET — asset symbol (required)
+ *   CLI_PRICE — bound price uint64 (required)
  *   OBSIDIAN_CONTRACT_ADDRESS — required
  */
 import { WebSocket } from 'ws';
@@ -46,9 +46,13 @@ const logger = pino({
   transport: { target: 'pino-pretty' },
 });
 
-const DEFAULT_SEED =
-  process.env['CLI_SEED']?.trim() ||
-  '0000000000000000000000000000000000000000000000000000000000000001';
+function requireEnv(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    throw new Error(`${name} is required`);
+  }
+  return value;
+}
 const PRIVATE_STATE_ID =
   process.env['CLI_PRIVATE_STATE_ID']?.trim() || 'CliObsidianCrossingPair';
 
@@ -137,8 +141,9 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const assetSymbol = process.env['CLI_ASSET']?.trim() || 'wETH';
-  const priceStr = process.env['CLI_PRICE']?.trim() || '2';
+  const seed = requireEnv('CLI_SEED');
+  const assetSymbol = requireEnv('CLI_ASSET');
+  const priceStr = requireEnv('CLI_PRICE');
   const boundPrice = parseLimitPriceToUint64(priceStr);
   const assetId = assetIdFromSymbol(assetSymbol);
   const assetIdHex = bytesToHex(assetId);
@@ -169,7 +174,7 @@ async function main(): Promise<void> {
     proofServer: config.proofServer,
   };
 
-  const wallet = await MidnightWalletProvider.build(logger, envConfig, DEFAULT_SEED);
+  const wallet = await MidnightWalletProvider.build(logger, envConfig, seed);
   await wallet.start();
   await syncWallet(logger, wallet.wallet, 600_000);
   const providers = buildProviders(wallet, zkConfigPath, config);

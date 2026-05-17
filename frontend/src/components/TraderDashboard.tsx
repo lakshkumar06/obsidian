@@ -10,17 +10,11 @@ import {
   OBSIDIAN_BROWSER_PRIVATE_STATE_ID,
 } from '../ensureObsidianCallPrivateState';
 import { formatMidnightError } from '../formatMidnightError';
-import {
-  enrichOrderLedgerStatuses,
-  pollOrderLedgerStatus,
-} from '../ledgerStatus';
-import { tryAutoMatchAndSettle, tryAutoSettlePendingMatch } from '../autoMatch';
-import { findCounterparty } from '../orderMatcher';
-import { explainQueueNoMatch, isQueuedInPool, reconcileQueueStatus } from '../orderMatcher';
+import { enrichOrderLedgerStatuses, pollOrderLedgerStatus } from '../ledgerStatus';
+import { reconcileQueueStatus } from '../orderMatcher';
 import { registerOrderWithRelayer } from '../registerRelayerIntent';
 import { assetIdFromSymbol, parseLimitPriceToUint64 } from '../obsidianBytes';
-import { watchTxnActivity, type TxnActivityWatcher } from '../txnActivity';
-import type { AutoMatchStep } from '../autoMatch';
+import { isSuccessTerminal, watchTxnActivity, type TxnFlowTerminal } from '../txnActivity';
 import type { OrderRow, OrderSide } from '../types';
 import { IconChevronDown } from './icons';
 import { OrderTicket, orderPlacedTagline, orderTicketStatus } from './OrderTicket';
@@ -38,13 +32,7 @@ type DashboardProps = {
   onTxnLoadingVisible?: (visible: boolean) => void;
 };
 
-const MATCH_STEP_ACTIVITY: Partial<Record<AutoMatchStep, string>> = {
-  'settle-check': 'tx.settling',
-  'find-pair': 'tx.finding_match',
-  propose_match: 'tx.propose_match',
-  atomic_settle: 'tx.settling',
-  poll: 'tx.settling',
-};
+const POST_SUBMIT_RELAYER_GRACE_MS = 120_000;
 
 function randomBytes32(): Uint8Array {
   const buf = new Uint8Array(32);
@@ -63,7 +51,7 @@ export function TraderDashboard({
   onOrderPlacedVisible,
   onTxnLoadingVisible,
 }: DashboardProps) {
-  const [asset, setAsset] = useState('wETH');
+  const [asset, setAsset] = useState('');
   const [side, setSide] = useState<OrderSide>('BUY');
   const [qty, setQty] = useState('');
   const [price, setPrice] = useState('');
@@ -73,13 +61,8 @@ export function TraderDashboard({
   const [ticketOrderId, setTicketOrderId] = useState<string | null>(null);
   const [txnLoading, setTxnLoading] = useState(false);
   const [txnStatusLabel, setTxnStatusLabel] = useState('Submitting order');
-  const autoMatchBusyRef = useRef(false);
   const submitFlowBusyRef = useRef(false);
-  const txnWatcherRef = useRef<TxnActivityWatcher | null>(null);
-  const pollMatchCooldownRef = useRef(0);
-
-  const POST_SUBMIT_MATCH_GRACE_MS = 90_000;
-  const POST_SUBMIT_QUEUED_GRACE_MS = 12_000;
+  const txnWatcherRef = useRef<ReturnType<typeof watchTxnActivity> | null>(null);
 
   const trimmedAddr = contractAddressDraft.trim();
   const ordersRef = useRef(orders);
@@ -106,89 +89,9 @@ export function TraderDashboard({
     !submitting &&
     !txnLoading &&
     trimmedAddr.length > 0 &&
+    asset.trim().length > 0 &&
     qty.trim().length > 0 &&
     price.trim().length > 0;
-
-  const runAutoMatch = useCallback(
-    async (
-      triggerOrderId?: string,
-      snapshot?: OrderRow[],
-      activity?: TxnActivityWatcher | null,
-    ): Promise<boolean> => {
-      const base = snapshot ?? ordersRef.current;
-      if (autoMatchBusyRef.current) {
-        return false;
-      }
-
-      if (!midnightProviders || trimmedAddr.length === 0) {
-        return false;
-      }
-      try {
-        assertIsContractAddress(trimmedAddr);
-      } catch {
-        return false;
-      }
-
-      const contractAddress = trimmedAddr as ContractAddress;
-      autoMatchBusyRef.current = true;
-      activity?.pushLocal({ type: 'tx.finding_match' });
-
-      let matched = false;
-      try {
-        const onProgress = (step: AutoMatchStep, detail: string) => {
-          const type = MATCH_STEP_ACTIVITY[step] ?? 'tx.finding_match';
-          activity?.pushLocal({ type, detail });
-        };
-        let settleResult = await tryAutoSettlePendingMatch({
-          providers: midnightProviders,
-          contractAddress,
-          orders: base,
-          onProgress,
-        });
-        let working = settleResult.orders;
-        if (!settleResult.matched) {
-          const matchResult = await tryAutoMatchAndSettle({
-            providers: midnightProviders,
-            contractAddress,
-            orders: working,
-            triggerOrderId,
-            onProgress,
-            onWalletApproval: (circuit) => {
-              activity?.pushLocal({
-                type: 'tx.wallet_confirm',
-                detail:
-                  circuit === 'propose_match'
-                    ? 'Confirm match in wallet'
-                    : 'Confirm settlement in wallet',
-              });
-            },
-          });
-          working = matchResult.orders;
-          matched = matchResult.matched;
-          if (!matchResult.matched && matchResult.message) {
-            console.info('[Obsidian]', matchResult.message);
-          }
-        } else {
-          matched = true;
-        }
-        if (matched) {
-          activity?.pushLocal({ type: 'match.settle_ok' });
-        }
-        setOrders(enrichOrderLedgerStatuses(working));
-        return matched;
-      } catch (err) {
-        console.error('[Obsidian] auto-match', err);
-        activity?.pushLocal({
-          type: 'tx.failed',
-          error: err instanceof Error ? err.message : String(err),
-        });
-        return false;
-      } finally {
-        autoMatchBusyRef.current = false;
-      }
-    },
-    [midnightProviders, trimmedAddr, setOrders],
-  );
 
   const refreshLedgerStatuses = useCallback(async () => {
     const snapshot = ordersRef.current;
@@ -215,24 +118,11 @@ export function TraderDashboard({
         }
         return reconcileQueueStatus({ ...row, ledgerStatus: hit.ledgerStatus });
       });
-      const enriched = enrichOrderLedgerStatuses(merged);
-      setOrders(enriched);
-
-      const diagnosis = explainQueueNoMatch(enriched);
-      const queuedCount = enriched.filter(isQueuedInPool).length;
-      if (
-        queuedCount >= 2 &&
-        diagnosis.includes('Cross found') &&
-        !autoMatchBusyRef.current &&
-        Date.now() - pollMatchCooldownRef.current > 90_000
-      ) {
-        pollMatchCooldownRef.current = Date.now();
-        void runAutoMatch(undefined, enriched);
-      }
+      setOrders(enrichOrderLedgerStatuses(merged));
     } catch {
       /* ignore poll errors */
     }
-  }, [midnightProviders, trimmedAddr, setOrders, runAutoMatch]);
+  }, [midnightProviders, trimmedAddr, setOrders]);
 
   useEffect(() => {
     if (!midnightProviders || orders.length === 0 || trimmedAddr.length === 0) {
@@ -245,24 +135,57 @@ export function TraderDashboard({
     return () => window.clearInterval(timer);
   }, [midnightProviders, trimmedAddr, orders.length, refreshLedgerStatuses]);
 
-  const prevOrderCountRef = useRef(0);
-  useEffect(() => {
-    if (!midnightProviders || trimmedAddr.length === 0) {
-      prevOrderCountRef.current = orders.length;
-      return;
-    }
-    if (txnLoading || submitFlowBusyRef.current) {
-      prevOrderCountRef.current = orders.length;
-      return;
-    }
-    if (orders.length > prevOrderCountRef.current) {
-      const snap = ordersRef.current;
-      if (snap.filter(isQueuedInPool).length >= 1 && !autoMatchBusyRef.current) {
-        void runAutoMatch(undefined, snap);
+  async function waitForRelayerOutcome(
+    orderId: string,
+    contractAddress: ContractAddress,
+    watcher: ReturnType<typeof watchTxnActivity>,
+    relayerTerminal: { current: TxnFlowTerminal | null },
+  ): Promise<'settled' | 'queued'> {
+    watcher.pushLocal({ type: 'tx.finding_match', detail: 'Relayer matching pool' });
+
+    const refreshSubmittedOrder = async (): Promise<OrderRow> => {
+      const row = ordersRef.current.find((o) => o.id === orderId);
+      if (!row || !midnightProviders) {
+        throw new Error('Order not found');
       }
+      const { status } = await pollOrderLedgerStatus(midnightProviders, contractAddress, row);
+      const updated = reconcileQueueStatus({ ...row, ledgerStatus: status });
+      const merged = enrichOrderLedgerStatuses(
+        ordersRef.current.map((o) => (o.id === orderId ? updated : o)),
+      );
+      ordersRef.current = merged;
+      setOrders(merged);
+      return merged.find((o) => o.id === orderId) ?? updated;
+    };
+
+    const started = Date.now();
+    while (Date.now() - started < POST_SUBMIT_RELAYER_GRACE_MS) {
+      const fresh = await refreshSubmittedOrder();
+      if (orderTicketStatus(fresh) === 'settled') {
+        relayerTerminal.current = 'complete';
+        break;
+      }
+      if (relayerTerminal.current && isSuccessTerminal(relayerTerminal.current)) {
+        break;
+      }
+      if (relayerTerminal.current === 'failed') {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 500));
     }
-    prevOrderCountRef.current = orders.length;
-  }, [midnightProviders, trimmedAddr, orders.length, runAutoMatch, txnLoading]);
+
+    const finalRow = ordersRef.current.find((o) => o.id === orderId);
+    if (finalRow && orderTicketStatus(finalRow) === 'settled') {
+      watcher.pushLocal({ type: 'tx.complete' });
+      return 'settled';
+    }
+    if (relayerTerminal.current === 'complete') {
+      watcher.pushLocal({ type: 'tx.complete' });
+      return 'settled';
+    }
+    watcher.pushLocal({ type: 'tx.queued' });
+    return 'queued';
+  }
 
   async function handleSubmitOrder(e: React.FormEvent) {
     e.preventDefault();
@@ -277,6 +200,12 @@ export function TraderDashboard({
       assertIsContractAddress(trimmedAddr);
     } catch {
       setSubmitError('Contract not configured');
+      return;
+    }
+
+    const assetSymbol = asset.trim();
+    if (!assetSymbol) {
+      setSubmitError('Asset symbol is required');
       return;
     }
 
@@ -298,14 +227,17 @@ export function TraderDashboard({
       const commitment = randomBytes32();
       const nullifier = randomBytes32();
       const commitmentHex = toHex(commitment);
-      const assetId = await assetIdFromSymbol(asset);
+      const assetId = await assetIdFromSymbol(assetSymbol);
       const orderId =
         typeof crypto.randomUUID === 'function'
           ? crypto.randomUUID()
           : btoa(Math.random().toString()).substring(0, 12);
 
       txnWatcherRef.current?.stop();
-      const watcher = watchTxnActivity(commitmentHex, setTxnStatusLabel);
+      const relayerTerminal = { current: null as TxnFlowTerminal | null };
+      const watcher = watchTxnActivity(commitmentHex, setTxnStatusLabel, (t) => {
+        relayerTerminal.current = t;
+      });
       txnWatcherRef.current = watcher;
       submitFlowBusyRef.current = true;
       watcher.pushLocal({ type: 'tx.submit_start' });
@@ -325,7 +257,7 @@ export function TraderDashboard({
 
       const newOrder: OrderRow = {
         id: orderId,
-        asset,
+        asset: assetSymbol,
         qty,
         price,
         side,
@@ -352,74 +284,7 @@ export function TraderDashboard({
       ordersRef.current = nextOrders;
       await registerOrderWithRelayer(withLedger);
 
-      const tryRunMatch = async (): Promise<boolean> => {
-        const snap = ordersRef.current;
-        const self = snap.find((o) => o.id === orderId) ?? withLedger;
-        if (!findCounterparty(self, snap)) {
-          return false;
-        }
-        watcher.pushLocal({ type: 'tx.finding_match' });
-        return runAutoMatch(orderId, snap, watcher);
-      };
-
-      const refreshSubmittedOrder = async (): Promise<OrderRow> => {
-        const row = ordersRef.current.find((o) => o.id === orderId) ?? withLedger;
-        const { status } = await pollOrderLedgerStatus(midnightProviders!, contractAddress, row);
-        const updated = reconcileQueueStatus({ ...row, ledgerStatus: status });
-        const merged = enrichOrderLedgerStatuses(
-          ordersRef.current.map((o) => (o.id === orderId ? updated : o)),
-        );
-        ordersRef.current = merged;
-        setOrders(merged);
-        return merged.find((o) => o.id === orderId) ?? updated;
-      };
-
-      let outcome: 'settled' | 'queued' = 'queued';
-      if (await tryRunMatch()) {
-        outcome = 'settled';
-      } else {
-        const started = Date.now();
-        let matchTouched = false;
-
-        while (Date.now() - started < POST_SUBMIT_MATCH_GRACE_MS) {
-          const fresh = await refreshSubmittedOrder();
-          if (orderTicketStatus(fresh) === 'settled') {
-            outcome = 'settled';
-            break;
-          }
-          if (
-            fresh.queueStatus === 'matching' ||
-            fresh.queueStatus === 'settling' ||
-            fresh.ledgerStatus?.inMatchLog
-          ) {
-            matchTouched = true;
-          }
-
-          if (!autoMatchBusyRef.current && (await tryRunMatch())) {
-            outcome = 'settled';
-            break;
-          }
-
-          const poolMayMatch = explainQueueNoMatch(ordersRef.current).includes('Cross found');
-          if (
-            !matchTouched &&
-            !poolMayMatch &&
-            Date.now() - started > POST_SUBMIT_QUEUED_GRACE_MS
-          ) {
-            outcome = 'queued';
-            break;
-          }
-
-          await new Promise((r) => setTimeout(r, 500));
-        }
-
-        if (orderTicketStatus(ordersRef.current.find((o) => o.id === orderId) ?? withLedger) === 'settled') {
-          outcome = 'settled';
-        }
-      }
-
-      watcher.pushLocal({ type: outcome === 'settled' ? 'tx.complete' : 'tx.queued' });
-      await new Promise((r) => setTimeout(r, 400));
+      await waitForRelayerOutcome(orderId, contractAddress, watcher, relayerTerminal);
 
       setQty('');
       setPrice('');
@@ -458,10 +323,8 @@ export function TraderDashboard({
       <div className="order-placed-screen" aria-live="polite">
         <div className="order-placed-layout">
           <div className="order-placed-copy">
-           
             <h2 className="order-placed-title">Order placed</h2>
             <p className="order-placed-tagline">{orderPlacedTagline(ticketOrder)}</p>
-            
             {statusHint ? <p className="order-placed-status">{statusHint}</p> : null}
           </div>
           <div className="order-placed-ticket-wrap">
@@ -508,15 +371,15 @@ export function TraderDashboard({
               placeholder="0"
               required
             />
-            <select
+            <input
               className="swap-select"
+              type="text"
               value={asset}
               onChange={(e) => setAsset(e.target.value)}
-              aria-label="Asset"
-            >
-              <option value="wETH">wETH</option>
-              <option value="wADA">wADA</option>
-            </select>
+              placeholder="Asset"
+              aria-label="Asset symbol"
+              required
+            />
           </div>
         </div>
 
@@ -546,7 +409,14 @@ export function TraderDashboard({
           type="submit"
           className={`btn-primary ${canSubmit || !isConnected ? 'ready' : ''}`}
           disabled={isConnected && !canSubmit}
-          onClick={!isConnected ? (e) => { e.preventDefault(); onConnectClick(); } : undefined}
+          onClick={
+            !isConnected
+              ? (e) => {
+                  e.preventDefault();
+                  onConnectClick();
+                }
+              : undefined
+          }
         >
           {primaryLabel}
         </button>

@@ -7,7 +7,8 @@
  *     97698b9701a6184d6b2353d27260be37c57fb5a5ecc23d221d46a4ccca9bc41f \
  *     5 wETH
  *
- * Args: <buyerCommitmentHex> <sellerCommitmentHex> <boundPrice> [assetSymbol]
+ * Args: <buyerCommitmentHex> <sellerCommitmentHex> <boundPrice> <assetSymbol>
+ * Env: CLI_SEED (required)
  */
 import { WebSocket } from 'ws';
 import { setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
@@ -35,19 +36,21 @@ const logger = pino({
   transport: { target: 'pino-pretty' },
 });
 
-const DEFAULT_SEED =
-  process.env['CLI_SEED']?.trim() ||
-  '0000000000000000000000000000000000000000000000000000000000000001';
 const PRIVATE_STATE_ID =
   process.env['CLI_PRIVATE_STATE_ID']?.trim() || 'CliObsidianMatchExisting';
 
 async function main(): Promise<void> {
-  const [buyerHex, sellerHex, priceStr, assetSymbol = 'wETH'] = process.argv.slice(2);
-  if (!buyerHex || !sellerHex || !priceStr) {
+  const [buyerHex, sellerHex, priceStr, assetSymbol] = process.argv.slice(2);
+  if (!buyerHex || !sellerHex || !priceStr || !assetSymbol) {
     console.error(
-      'Usage: yarn match-existing <buyerCommitmentHex> <sellerCommitmentHex> <boundPrice> [assetSymbol]',
+      'Usage: yarn match-existing <buyerCommitmentHex> <sellerCommitmentHex> <boundPrice> <assetSymbol>',
     );
     process.exit(1);
+  }
+
+  const seed = process.env['CLI_SEED']?.trim();
+  if (!seed) {
+    throw new Error('CLI_SEED is required in ../.env');
   }
 
   const contractAddress = process.env['OBSIDIAN_CONTRACT_ADDRESS']?.trim();
@@ -75,7 +78,7 @@ async function main(): Promise<void> {
     proofServer: config.proofServer,
   };
 
-  const wallet = await MidnightWalletProvider.build(logger, envConfig, DEFAULT_SEED);
+  const wallet = await MidnightWalletProvider.build(logger, envConfig, seed);
   await wallet.start();
   await syncWallet(logger, wallet.wallet, 600_000);
   const providers = buildProviders(wallet, zkConfigPath, config);

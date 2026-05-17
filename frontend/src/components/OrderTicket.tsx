@@ -13,7 +13,7 @@ export function orderTicketStatus(order: OrderRow): OrderTicketStatus {
   return 'awaiting_match';
 }
 
-export function stubStatusLabel(status: OrderTicketStatus): string {
+export function ticketStatusLabel(status: OrderTicketStatus): string {
   if (status === 'settled') {
     return 'SETTLED';
   }
@@ -157,7 +157,7 @@ export function OrderTicket({ order, onDismiss, embedded = false }: OrderTicketP
 
       <div className="order-ticket-stub">
         <p className={`order-ticket-stub-status order-ticket-stub-status--${status}`}>
-          {stubStatusLabel(status)}
+          {ticketStatusLabel(status)}
         </p>
       </div>
 
